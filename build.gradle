@@ -3,3 +3,20 @@
 plugins {
     id 'com.gtnewhorizons.gtnhconvention'
 }
+
+minecraft {
+    // extraRunJvmArguments.add("-Drfb.dumpLoadedClasses=true")
+    // extraRunJvmArguments.add("-verbose")
+    extraRunJvmArguments.add("-Djava.system.class.loader=com.gtnewhorizons.retrofuturabootstrap.RfbSystemClassLoader")
+}
+
+runClient17.dependsOn build
+
+tasks.register('copyNatives', Copy) {
+    from "native/target/debug/libmcvk.so"
+    into "build/resources/main/natives/"
+}
+
+build.dependsOn copyNatives
+jar.dependsOn copyNatives
+checkstyleMain.dependsOn copyNatives

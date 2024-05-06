@@ -3,6 +3,8 @@ package com.recursive_pineapple.mcvk;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.recursive_pineapple.mcvk.rendering.MCVKNative;
+
 import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.SidedProxy;
 import cpw.mods.fml.common.event.FMLInitializationEvent;
@@ -16,15 +18,24 @@ public class MCVK {
     public static final String MODID = "mcvk";
     public static final Logger LOG = LogManager.getLogger(MODID);
 
+    private static boolean isValid = true;
+
     @SidedProxy(
         clientSide = "com.recursive_pineapple.mcvk.ClientProxy",
         serverSide = "com.recursive_pineapple.mcvk.CommonProxy")
     public static CommonProxy proxy;
 
+    public static void setInvalid() {
+        isValid = false;
+        // todo: disable the mod
+    }
+
     @Mod.EventHandler
     // preInit "Run before anything else. Read your config, create blocks, items, etc, and register them with the
     // GameRegistry." (Remove if not needed)
     public void preInit(FMLPreInitializationEvent event) {
+        MCVKNative.load();
+        
         proxy.preInit(event);
     }
 
