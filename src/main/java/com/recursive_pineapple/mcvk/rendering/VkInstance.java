@@ -13,14 +13,16 @@ import java.util.logging.Logger;
 
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.glfw.GLFW;
-import org.lwjgl.glfw.GLFWVulkan;
+import org.lwjgl.system.SharedLibrary;
 
 import com.recursive_pineapple.mcvk.MCVK;
 
+import me.eigenraven.lwjgl3ify.api.Lwjgl3Aware;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.data.AnimationMetadataSection;
 import sun.misc.Unsafe;
 
+@Lwjgl3Aware
 public class VkInstance {
     
     private static VkInstance INSTANCE;
@@ -46,12 +48,14 @@ public class VkInstance {
     VkInstance(long window_ptr) {
         MCVK.LOG.info("Initializing Vulkan for window 0x" + Long.toHexString(window_ptr));
 
+        SharedLibrary glfw = GLFW.getLibrary();
+
         this.instance_ptr = MCVKNative.createInstance(
             window_ptr,
-            GLFWVulkan.Functions.GetRequiredInstanceExtensions,
-            GLFWVulkan.Functions.GetPhysicalDevicePresentationSupport,
-            GLFWVulkan.Functions.CreateWindowSurface,
-            GLFW.Functions.GetWindowSize
+            glfw.getFunctionAddress("glfwGetRequiredInstanceExtensions"),
+            glfw.getFunctionAddress("glfwGetPhysicalDevicePresentationSupport"),
+            glfw.getFunctionAddress("glfwCreateWindowSurface"),
+            glfw.getFunctionAddress("glfwGetWindowSize")
         );
     }
 

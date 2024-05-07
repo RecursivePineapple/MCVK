@@ -40,6 +40,7 @@ public class CoreTransformer implements RfbClassTransformer {
 
     private static final List<String> packageBlacklist = Arrays.asList(
         "org/lwjglx",
+        "org/lwjgl",
         "com/recursive_pineapple/mcvk"
     );
 
@@ -56,8 +57,6 @@ public class CoreTransformer implements RfbClassTransformer {
         @NotNull String className,
         @NotNull ClassNodeHandle classNode
     ) {
-        if(true) throw new RuntimeException("AAAAAAAAAAAAAAAAAAAAAAAAAA");
-
         if(className.equals("org.lwjglx.opengl.Display")) {
             return true;
         }
