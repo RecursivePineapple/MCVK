@@ -4,6 +4,8 @@ minecraft {
     lwjgl3Version = "3.3.3"
 }
 
+def asmVersion = "9.7"
+
 dependencies {
     runtimeOnlyNonPublishable("com.github.GTNewHorizons:NotEnoughItems:2.5.4-GTNH:dev")
 
@@ -13,5 +15,7 @@ dependencies {
     compileOnly 'com.github.GTNewHorizons:lwjgl3ify:2.0.7'
 
     compileOnly 'com.gtnewhorizons.retrofuturabootstrap:RetroFuturaBootstrap:1.0.2'
-    implementation 'org.ow2.asm:asm:9.7'
+
+    implementation("org.ow2.asm:asm:${asmVersion}")
+    implementation("org.ow2.asm:asm-tree:${asmVersion}")
 }

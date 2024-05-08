@@ -1,37 +1,41 @@
 package com.recursive_pineapple.mcvk.asm;
 
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
-import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.jar.Manifest;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
-import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.LocalVariableNode;
 import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 import com.gtnewhorizons.retrofuturabootstrap.api.ClassNodeHandle;
 import com.gtnewhorizons.retrofuturabootstrap.api.ExtensibleClassLoader;
 import com.gtnewhorizons.retrofuturabootstrap.api.RfbClassTransformer;
 import com.recursive_pineapple.mcvk.MCVKCore;
 
-import net.minecraft.launchwrapper.IClassTransformer;
-
 public class CoreTransformer implements RfbClassTransformer {
 
     private static final String GL = "org/lwjgl/opengl/GL";
+    private static final String XGL = "org/lwjgl/opengl/GL";
 
     private static final ClassConstantPoolParser ccpp = new ClassConstantPoolParser(
-        GL
+        GL,
+        XGL
     );
 
     private static final List<String> classBlacklist = Arrays.asList(
@@ -39,10 +43,37 @@ public class CoreTransformer implements RfbClassTransformer {
     );
 
     private static final List<String> packageBlacklist = Arrays.asList(
-        "org/lwjglx",
-        "org/lwjgl",
-        "com/recursive_pineapple/mcvk"
+        "org.lwjglx.",
+        "org.lwjgl.",
+        "com.recursive_pineapple.mcvk"
     );
+
+    private final ClassNode renderSandbox;
+    private final HashSet<String> renderSandboxMethods = new HashSet<>();
+
+    public CoreTransformer() {
+        renderSandbox = loadClass("com/recursive_pineapple/mcvk/rendering/RenderSandbox.class");
+
+        for(var method : renderSandbox.methods) {
+            if(!"<init>".equals(method.name)) {
+                renderSandboxMethods.add(method.name + method.desc);
+            }
+        }
+        System.out.println("renderSandboxMethods: " + (renderSandboxMethods));
+    }
+
+    private ClassNode loadClass(String path) {
+        try {
+            ClassReader reader = new ClassReader(CoreTransformer.class.getClassLoader().getResourceAsStream(path));
+
+            ClassNode node = new ClassNode();
+            reader.accept(node, 0);
+
+            return node;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     @Override
     public @NotNull String id() {
@@ -89,7 +120,7 @@ public class CoreTransformer implements RfbClassTransformer {
         }
 
         if(ccpp.find(classNode.getOriginalBytes())) {
-
+            tryRedirectOpenGL(className, classNode);
         }
     }
 
@@ -112,49 +143,35 @@ public class CoreTransformer implements RfbClassTransformer {
         redirectOpenGL(classNode.getNode());
     }
 
-    private byte[] transform(byte[] basicClass, Consumer<ClassNode> transformer) {
-        ClassReader reader = new ClassReader(basicClass);
-
-        ClassNode node = new ClassNode();
-        reader.accept(node, 0);
-
-        transformer.accept(node);
-
-        ClassWriter writer = new ClassWriter(reader, 0);
-        node.accept(writer);
-
-        return writer.toByteArray();
-    }
-
     private void transformDisplay(ClassNode display) {
         for(var method: display.methods) {
             if(method.name.equals("create")) {
                 injectInsns(
-                    method.instructions,
+                    method,
                     new InsnPredicate[] {
                         isGetStatic("org/lwjglx/opengl/Display$Window", null, "handle"),
                         isInvokeStatic("org/lwjgl/glfw/GLFW", null, "glfwMakeContextCurrent")
                     },
                     () -> new AbstractInsnNode[] {
                         new FieldInsnNode(Opcodes.GETSTATIC, "org/lwjglx/opengl/Display$Window", "handle", "J"),
-                        new MethodInsnNode(Opcodes.INVOKESTATIC, "com/recursive_pineapple/mcvk/rendering/VkInstance", "init", "(J)V")
+                        new MethodInsnNode(Opcodes.INVOKESTATIC, "com/recursive_pineapple/mcvk/rendering/VkInstance", "init", "(J)V", false)
                     }
                 );
 
                 injectInsns(
-                    method.instructions,
+                    method,
                     new InsnPredicate[] {
                         isInvokeStatic("org/lwjgl/glfw/GLFW", null, "glfwDefaultWindowHints")
                     },
                     () -> new AbstractInsnNode[] {
                         new LdcInsnNode(139265 /* GLFW_CLIENT_API */),
                         new LdcInsnNode(0),
-                        new MethodInsnNode(Opcodes.INVOKESTATIC, "org/lwjgl/glfw/GLFW", "glfwWindowHint", "(II)V")
+                        new MethodInsnNode(Opcodes.INVOKESTATIC, "org/lwjgl/glfw/GLFW", "glfwWindowHint", "(II)V", false)
                     }
                 );
 
                 removeInsns(
-                    method.instructions,
+                    method,
                     new InsnPredicate[] {
                         isGetStatic("org/lwjglx/opengl/Display$Window", null, "handle"),
                         isInvokeStatic("org/lwjgl/glfw/GLFW", null, "glfwMakeContextCurrent")
@@ -162,7 +179,7 @@ public class CoreTransformer implements RfbClassTransformer {
                 );
 
                 removeInsns(
-                    method.instructions,
+                    method,
                     new InsnPredicate[] {
                         isNew("org/lwjglx/opengl/DrawableGL"),
                         isBasic(Opcodes.DUP),
@@ -172,7 +189,7 @@ public class CoreTransformer implements RfbClassTransformer {
                 );
 
                 removeInsns(
-                    method.instructions,
+                    method,
                     new InsnPredicate[] {
                         isNew("org/lwjglx/opengl/DrawableGL"),
                         isBasic(Opcodes.DUP),
@@ -182,7 +199,7 @@ public class CoreTransformer implements RfbClassTransformer {
                 );
 
                 removeInsns(
-                    method.instructions,
+                    method,
                     new InsnPredicate[] {
                         isInvokeStatic("org/lwjgl/opengl/GL", null, "createCapabilities"),
                         isBasic(Opcodes.POP),
@@ -196,17 +213,32 @@ public class CoreTransformer implements RfbClassTransformer {
     private void transformSplashProgress(ClassNode splashProgress) {
         for(var method : splashProgress.methods) {
             if(method.name.equals("start")) {
-                removeInsns(method.instructions, new InsnPredicate[] {
+                var matchers = new InsnPredicate[] {
                     isNew("org/lwjgl/opengl/SharedDrawable"),
                     isBasic(Opcodes.DUP),
-                    isInvokeStatic(null, null, "getDrawable"),
+                    isInvoke(null, null, "getDrawable"),
                     isInit("org/lwjgl/opengl/SharedDrawable", null),
                     isPutStatic(null, null, "d"),
-                    isInvokeStatic("org/lwjgl/opengl/Display", null, "getDrawable"),
-                    isInvokeInterface("org/lwjgl/opengl/Drawable", null, "releaseContext"),
-                    isGetStatic(null, "Lorg/lwjgl/opengl/Drawable", "d"),
-                    isInvokeInterface("org/lwjgl/opengl/Drawable", null, "makeCurrent")
-                });
+                    isInvoke(null, null, "getDrawable"),
+                    isInvoke(null, null, "releaseContext"),
+                    isGetStatic(null, null, "d"),
+                    isInvoke("org/lwjgl/opengl/Drawable", null, "makeCurrent"),
+                    isBasic(Opcodes.GOTO),
+                    isStoreVar(null, "e"),
+                    isGetVar(null, "e"),
+                    isInvoke(null, null, "printStackTrace"),
+                    isNew("java/lang/RuntimeException"),
+                    isBasic(Opcodes.DUP),
+                    isGetVar(null, "e"),
+                    isInit("java/lang/RuntimeException", null),
+                    isBasic(Opcodes.ATHROW),
+                };
+
+                boolean removed = removeInsns(method, matchers);
+
+                if(!removed) {
+                    throw new RuntimeException("failed to remove SplashProgress context creation insns.");
+                }
             }
         }
     }
@@ -216,12 +248,20 @@ public class CoreTransformer implements RfbClassTransformer {
             var insn = method.instructions.getFirst();
             while(insn != null) {
                 if(insn instanceof MethodInsnNode methodInsn) {
-                    if(methodInsn.owner.startsWith(GL)) {
-                        MCVKCore.LOG.trace(
-                            "Redirecting OpenGL call {}.{}{} in method {}.{}{}",
-                            methodInsn.owner, methodInsn.name, methodInsn.desc,
-                            target.name, method.name, method.desc
-                        );
+                    if(methodInsn.owner.startsWith("org.lwjgl.opengl.GL") || methodInsn.owner.startsWith(XGL)) {
+                        if(renderSandboxMethods.contains(method.name + method.desc)) {
+                            MCVKCore.LOG.trace(
+                                "Redirecting OpenGL call {}.{}{} in method {}.{}{}",
+                                methodInsn.owner, methodInsn.name, methodInsn.desc,
+                                target.name, method.name, method.desc
+                            );
+                        } else {
+                            MCVKCore.LOG.warn(
+                                "Unimplemented OpenGL call {}.{}{} in method {}.{}{}: it will be no-oped",
+                                methodInsn.owner, methodInsn.name, methodInsn.desc,
+                                target.name, method.name, method.desc
+                            );
+                        }
                         methodInsn.owner = "com/recursive_pineapple/mcvk/rendering/RenderSandbox";
                     }
                 }
@@ -233,85 +273,90 @@ public class CoreTransformer implements RfbClassTransformer {
 
     @FunctionalInterface
     static interface InsnPredicate {
-        public boolean test(AbstractInsnNode node);
+        public boolean test(MethodNode method, AbstractInsnNode node);
     }
 
-    static boolean injectInsns(InsnList list, InsnPredicate[] matchers, Supplier<AbstractInsnNode[]> toInject) {
+    static interface InsnConsumer {
+        public void consume(AbstractInsnNode first, AbstractInsnNode last, List<AbstractInsnNode> contents);
+    }
+
+    static boolean findInsns(MethodNode method, InsnPredicate[] matchers, InsnConsumer consumer) {
         if(matchers.length == 0) {
             return false;
         }
 
-        AbstractInsnNode current = list.getFirst();
+        AbstractInsnNode current = method.instructions.getFirst();
 
-        boolean injectedSomething = false;
+        ArrayList<AbstractInsnNode> contents = new ArrayList<>();
 
-        while(current != null) {
-            int i = 0;
-
-            AbstractInsnNode needle = current;
-
-            while(needle != null && i < matchers.length && matchers[i].test(needle)) {
-                i++;
-                needle = current.getNext();
-            }
-
-            if(i == matchers.length) {
-                AbstractInsnNode[] inject = toInject.get();
-
-                for(var node : inject) {
-                    list.insert(current, node);
-                    current = current.getNext();
-                }
-
-                injectedSomething = true;
-            }
-
-            current = current.getNext();
-        }
-
-        return injectedSomething;
-    }
-
-    static boolean removeInsns(InsnList list, InsnPredicate[] matchers) {
-        if(matchers.length == 0) {
-            return false;
-        }
-
-        AbstractInsnNode current = list.getFirst();
-
-        AbstractInsnNode[] toRemove = new AbstractInsnNode[matchers.length];
-
-        boolean removedSomething = false;
+        boolean foundAnything = false;
 
         while(current != null) {
             int i = 0;
 
-            AbstractInsnNode needle = current;
+            AbstractInsnNode cursor = current;
 
-            while(needle != null && i < matchers.length && matchers[i].test(needle)) {
-                toRemove[i] = needle;
-                i++;
-                needle = current.getNext();
+            contents.clear();
+
+            while(cursor != null && i < matchers.length) {
+                if(cursor.getOpcode() != -1) {
+                    if(matchers[i].test(method, cursor)) {
+                        i++;
+                    } else {
+                        break;
+                    }
+                }
+
+                contents.add(cursor);
+                cursor = cursor.getNext();
             }
 
             if(i == matchers.length) {
-                current = toRemove[toRemove.length - 1].getNext();
+                AbstractInsnNode first = current;
+                current = cursor.getNext();
 
-                for(AbstractInsnNode node : toRemove) {
-                    list.remove(node);
-                }
+                consumer.consume(first, cursor, contents);
 
-                removedSomething = true;
+                foundAnything = true;
             } else {
                 current = current.getNext();
             }
         }
 
-        return removedSomething;
+        return foundAnything;
+    }
+
+    static boolean injectInsns(MethodNode method, InsnPredicate[] matchers, Supplier<AbstractInsnNode[]> toInject) {
+        return findInsns(method, matchers, (first, last, nodes) -> {
+            AbstractInsnNode[] inject = toInject.get();
+
+            for(var node : inject) {
+                method.instructions.insert(last, node);
+                last = node;
+            }
+        });
+    }
+
+    static boolean removeInsns(MethodNode method, InsnPredicate[] matchers) {
+        return findInsns(method, matchers, (first, last, nodes) -> {
+            for(var node : nodes) {
+                method.instructions.remove(node);
+
+                if(node instanceof LabelNode label) {
+                    var iter = method.tryCatchBlocks.iterator();
+
+                    while(iter.hasNext()) {
+                        if(iter.next().start == label) {
+                            iter.remove();
+                        }
+                    }
+                }
+            }
+        });
     }
 
     static InsnPredicate isGetStatic(@Nullable String owner, @Nullable String desc, @Nullable String name) {
-        return insn -> insn.getOpcode() == Opcodes.GETSTATIC &&
+        return (method, insn) -> insn.getOpcode() == Opcodes.GETSTATIC &&
             insn instanceof FieldInsnNode node &&
             (owner == null || owner.equals(node.owner)) && 
             (desc == null || desc.equals(node.desc)) && 
@@ -319,15 +364,39 @@ public class CoreTransformer implements RfbClassTransformer {
     }
 
     static InsnPredicate isPutStatic(@Nullable String owner, @Nullable String desc, @Nullable String name) {
-        return insn -> insn.getOpcode() == Opcodes.PUTSTATIC &&
+        return (method, insn) -> insn.getOpcode() == Opcodes.PUTSTATIC &&
             insn instanceof FieldInsnNode node &&
             (owner == null || owner.equals(node.owner)) && 
             (desc == null || desc.equals(node.desc)) && 
             (name == null || name.equals(node.name));
     }
 
+    static InsnPredicate isGetVar(@Nullable String desc, @Nullable String name) {
+        return (method, insn) -> {
+            if(insn.getOpcode() == Opcodes.ALOAD && insn instanceof VarInsnNode node) {
+                LocalVariableNode var = ASMUtils.getVariableNode(method.localVariables, node.var);
+
+                return var != null && (desc == null || desc.equals(var.desc)) && (name == null || name.equals(var.name));
+            } else {
+                return false;
+            }
+        };  
+    }
+
+    static InsnPredicate isStoreVar(@Nullable String desc, @Nullable String name) {
+        return (method, insn) -> {
+            if(insn.getOpcode() == Opcodes.ASTORE && insn instanceof VarInsnNode node) {
+                LocalVariableNode var = ASMUtils.getVariableNode(method.localVariables, node.var);
+
+                return var != null && (desc == null || desc.equals(var.desc)) && (name == null || name.equals(var.name));
+            } else {
+                return false;
+            }
+        };  
+    }
+
     static InsnPredicate isInvokeStatic(@Nullable String owner, @Nullable String desc, @Nullable String name) {
-        return insn -> insn.getOpcode() == Opcodes.INVOKESTATIC &&
+        return (method, insn) -> insn.getOpcode() == Opcodes.INVOKESTATIC &&
             insn instanceof MethodInsnNode node &&
             (owner == null || owner.equals(node.owner)) && 
             (desc == null || desc.equals(node.desc)) && 
@@ -336,7 +405,7 @@ public class CoreTransformer implements RfbClassTransformer {
     }
 
     static InsnPredicate isInvokeInterface(@Nullable String owner, @Nullable String desc, @Nullable String name) {
-        return insn -> insn.getOpcode() == Opcodes.INVOKEINTERFACE &&
+        return (method, insn) -> insn.getOpcode() == Opcodes.INVOKEINTERFACE &&
             insn instanceof MethodInsnNode node &&
             (owner == null || owner.equals(node.owner)) && 
             (desc == null || desc.equals(node.desc)) && 
@@ -344,14 +413,21 @@ public class CoreTransformer implements RfbClassTransformer {
             node.itf == true;
     }
 
+    static InsnPredicate isInvoke(@Nullable String owner, @Nullable String desc, @Nullable String name) {
+        return (method, insn) -> insn instanceof MethodInsnNode node &&
+            (owner == null || owner.equals(node.owner)) && 
+            (desc == null || desc.equals(node.desc)) && 
+            (name == null || name.equals(node.name));
+    }
+
     static InsnPredicate isNew(@Nullable String desc) {
-        return insn -> insn.getOpcode() == Opcodes.NEW &&
+        return (method, insn) -> insn.getOpcode() == Opcodes.NEW &&
             insn instanceof TypeInsnNode node &&
             (desc == null || desc.equals(node.desc));
     }
 
     static InsnPredicate isInit(@Nullable String owner, @Nullable String desc) {
-        return insn -> insn.getOpcode() == Opcodes.INVOKESPECIAL &&
+        return (method, insn) -> insn.getOpcode() == Opcodes.INVOKESPECIAL &&
             insn instanceof MethodInsnNode node &&
             (owner == null || owner.equals(node.owner)) && 
             node.name.equals("<init>") && 
@@ -360,6 +436,6 @@ public class CoreTransformer implements RfbClassTransformer {
     }
 
     static InsnPredicate isBasic(int opcode) {
-        return insn -> insn.getOpcode() == opcode;
+        return (method, insn) -> insn.getOpcode() == opcode;
     }
 }
