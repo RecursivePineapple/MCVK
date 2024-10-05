@@ -3,7 +3,10 @@ use std::{
     fmt::Debug,
     hint::spin_loop,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 pub struct SpinLock<T> {
@@ -53,8 +56,44 @@ impl<T> Drop for SpinGuard<'_, T> {
     }
 }
 
+impl<T: Debug> Debug for SpinGuard<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
 impl<T: Debug> Debug for SpinLock<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.lock().fmt(f)
+    }
+}
+
+impl<T> SpinLock<Arc<T>> {
+    pub fn get(&self) -> Arc<T> {
+        Arc::clone(&*self.lock())
+    }
+
+    pub fn set(&self, new: Arc<T>) {
+        *self.lock() = new;
+    }
+}
+
+impl<T> SpinLock<Vec<T>> {
+    pub fn push(&self, value: T) {
+        self.lock().push(value);
+    }
+}
+
+impl<T> SpinLock<T> {
+    pub fn swap(&self, mut new: T) -> T {
+        let mut l = self.lock();
+        std::mem::swap(&mut new, &mut l);
+        new
+    }
+}
+
+impl<T: Default> SpinLock<T> {
+    pub fn extract(&self) -> T {
+        std::mem::take(&mut *self.lock())
     }
 }

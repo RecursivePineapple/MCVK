@@ -11,7 +11,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.points.AfterInvoke;
 
 import com.recursive_pineapple.mcvk.MCVK;
-import com.recursive_pineapple.mcvk.rendering.VkInstance;
+import com.recursive_pineapple.mcvk.rendering.MCVKNative;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.crash.CrashReportCategory;
@@ -26,11 +26,11 @@ public class MinecraftMixins {
 
     @Inject(method = "runGameLoop", at = @At("HEAD"))
     private void startFrame(CallbackInfo _ci) {
-        VkInstance.getInstance().startFrame();
+        MCVKNative.startFrame(Minecraft.getMinecraft());
     }
 
     @Inject(method = "runGameLoop", at = @At("TAIL"))
     private void finishFrame(CallbackInfo _ci) {
-        VkInstance.getInstance().finishFrame();
+        MCVKNative.finishFrame();
     }
 }

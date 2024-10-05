@@ -3,7 +3,7 @@ package com.recursive_pineapple.mcvk.asm;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.function.Supplier;
 import java.util.jar.Manifest;
@@ -15,6 +15,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LocalVariableNode;
@@ -22,6 +23,7 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.spongepowered.asm.lib.Type;
 
 import com.gtnewhorizons.retrofuturabootstrap.api.ClassNodeHandle;
 import com.gtnewhorizons.retrofuturabootstrap.api.ExtensibleClassLoader;
@@ -48,21 +50,27 @@ public class CoreTransformer implements RfbClassTransformer {
         "com.recursive_pineapple.mcvk"
     );
 
-    private final ClassNode renderSandbox;
-    private final HashSet<String> renderSandboxMethods = new HashSet<>();
+    private static final HashMap<String, String> renderSandboxMethods = new HashMap<>();
 
-    public CoreTransformer() {
-        renderSandbox = loadClass("com/recursive_pineapple/mcvk/rendering/RenderSandbox.class");
+    static {
+        var renderSandbox = loadClass("com/recursive_pineapple/mcvk/rendering/RenderSandbox.class");
 
         for(var method : renderSandbox.methods) {
             if(!"<init>".equals(method.name)) {
-                renderSandboxMethods.add(method.name + method.desc);
+                renderSandboxMethods.put(method.name + method.desc, "com/recursive_pineapple/mcvk/rendering/RenderSandbox");
             }
         }
-        System.out.println("renderSandboxMethods: " + (renderSandboxMethods));
+
+        var renderSandboxGen = loadClass("com/recursive_pineapple/mcvk/rendering/RenderSandboxGen.class");
+
+        for(var method : renderSandboxGen.methods) {
+            if(!"<init>".equals(method.name)) {
+                renderSandboxMethods.put(method.name + method.desc, "com/recursive_pineapple/mcvk/rendering/RenderSandboxGen");
+            }
+        }
     }
 
-    private ClassNode loadClass(String path) {
+    private static ClassNode loadClass(String path) {
         try {
             ClassReader reader = new ClassReader(CoreTransformer.class.getClassLoader().getResourceAsStream(path));
 
@@ -74,6 +82,11 @@ public class CoreTransformer implements RfbClassTransformer {
             throw new RuntimeException(e);
         }
     }
+
+    public CoreTransformer() {
+
+    }
+
 
     @Override
     public @NotNull String id() {
@@ -96,7 +109,7 @@ public class CoreTransformer implements RfbClassTransformer {
             return true;
         }
 
-        if(ccpp.find(classNode.getOriginalBytes())) {
+        if(ccpp.find(classNode.getOriginalBytes(), true)) {
             return true;
         }
 
@@ -119,13 +132,10 @@ public class CoreTransformer implements RfbClassTransformer {
             transformSplashProgress(classNode.getNode());
         }
 
-        if(ccpp.find(classNode.getOriginalBytes())) {
-            tryRedirectOpenGL(className, classNode);
-        }
+        tryRedirectOpenGL(className, classNode);
     }
 
     private void tryRedirectOpenGL(String name, ClassNodeHandle classNode) {
-
         if(classBlacklist.contains(name)) {
             return;
         }
@@ -154,7 +164,7 @@ public class CoreTransformer implements RfbClassTransformer {
                     },
                     () -> new AbstractInsnNode[] {
                         new FieldInsnNode(Opcodes.GETSTATIC, "org/lwjglx/opengl/Display$Window", "handle", "J"),
-                        new MethodInsnNode(Opcodes.INVOKESTATIC, "com/recursive_pineapple/mcvk/rendering/VkInstance", "init", "(J)V", false)
+                        new MethodInsnNode(Opcodes.INVOKESTATIC, "com/recursive_pineapple/mcvk/rendering/MCVKNative", "init", "(J)V", false)
                     }
                 );
 
@@ -245,28 +255,77 @@ public class CoreTransformer implements RfbClassTransformer {
 
     private void redirectOpenGL(ClassNode target) {
         for(var method : target.methods) {
-            var insn = method.instructions.getFirst();
-            while(insn != null) {
-                if(insn instanceof MethodInsnNode methodInsn) {
-                    if(methodInsn.owner.startsWith("org.lwjgl.opengl.GL") || methodInsn.owner.startsWith(XGL)) {
-                        if(renderSandboxMethods.contains(method.name + method.desc)) {
+            var iter = method.instructions.iterator();
+
+            while(iter.hasNext()) {
+                if(iter.next() instanceof MethodInsnNode methodInsn) {
+                    if(methodInsn.owner.startsWith(GL) || methodInsn.owner.startsWith(XGL) || (methodInsn.owner.equals("org.lwjglx.opengl.Display") && methodInsn.name.equals("makeCurrent"))) {
+                        var sandbox = renderSandboxMethods.get(methodInsn.name + methodInsn.desc);
+
+                        if(sandbox != null) {
                             MCVKCore.LOG.trace(
                                 "Redirecting OpenGL call {}.{}{} in method {}.{}{}",
                                 methodInsn.owner, methodInsn.name, methodInsn.desc,
                                 target.name, method.name, method.desc
                             );
+
+                            methodInsn.owner = sandbox;
                         } else {
                             MCVKCore.LOG.warn(
-                                "Unimplemented OpenGL call {}.{}{} in method {}.{}{}: it will be no-oped",
+                                "Unimplemented OpenGL call {}.{}{} in method {}.{}{}: it will be removed",
                                 methodInsn.owner, methodInsn.name, methodInsn.desc,
                                 target.name, method.name, method.desc
                             );
+
+                            var params = Type.getArgumentTypes(methodInsn.desc);
+                            var ret = Type.getReturnType(methodInsn.desc);
+
+                            iter.remove();
+
+                            for(var param : params) {
+                                if(param == Type.DOUBLE_TYPE || param == Type.LONG_TYPE) {
+                                    iter.add(new InsnNode(Opcodes.POP2));
+                                } else {
+                                    iter.add(new InsnNode(Opcodes.POP));
+                                }
+                            }
+
+                            if(
+                                ret == Type.BOOLEAN_TYPE ||
+                                ret == Type.CHAR_TYPE ||
+                                ret == Type.BYTE_TYPE ||
+                                ret == Type.SHORT_TYPE ||
+                                ret == Type.INT_TYPE
+                            ) {
+                                iter.add(new InsnNode(Opcodes.ICONST_0));
+                            }
+
+                            if(
+                                ret == Type.LONG_TYPE
+                            ) {
+                                iter.add(new InsnNode(Opcodes.LCONST_0));
+                            }
+
+                            if(
+                                ret == Type.FLOAT_TYPE
+                            ) {
+                                iter.add(new InsnNode(Opcodes.FCONST_0));
+                            }
+
+                            if(
+                                ret == Type.DOUBLE_TYPE
+                            ) {
+                                iter.add(new InsnNode(Opcodes.DCONST_0));
+                            }
+
+                            if(
+                                ret.getSort() == Type.OBJECT
+                            ) {
+                                iter.add(new InsnNode(Opcodes.ACONST_NULL));
+                            }
                         }
-                        methodInsn.owner = "com/recursive_pineapple/mcvk/rendering/RenderSandbox";
                     }
                 }
-
-                insn = insn.getNext();
             }
         }
     }

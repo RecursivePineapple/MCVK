@@ -1,49 +1,97 @@
-use std::{
-    cell::RefCell,
-    ops::Deref,
-    sync::{Arc, Mutex},
-};
+use std::sync::{atomic::AtomicI32, Arc, Mutex};
 
-use bytemuck::{Pod, Zeroable};
-use enum_primitive::*;
-use nalgebra_glm::{TVec3, TVec4, Vec3};
+use nalgebra_glm::{DVec3, Vec3, Vec4};
 use num_derive::{FromPrimitive, ToPrimitive};
 
-use super::{spinlock::SpinLock, textures::textures::TextureHandle};
+use super::{insn_assembler::RenderInsnAssembler, spinlock::SpinLock};
 
-pub static RENDER_SANDBOX_LIST: Mutex<Vec<Arc<SpinLock<Option<Vec<RenderInstruction>>>>>> =
-    Mutex::new(Vec::new());
+pub type RenderSandboxStack = Arc<SpinLock<RenderSandbox>>;
 
 thread_local! {
-    pub static RENDER_SANDBOX: Arc<SpinLock<Option<Vec<RenderInstruction>>>> = Arc::new(SpinLock::new(None));
+    pub static RENDER_SANDBOX: RenderSandboxStack = Arc::new(SpinLock::new(RenderSandbox::None));
 }
 
-#[derive(Debug, Clone, Copy, Zeroable, Pod, PartialEq)]
-#[repr(C)]
-pub struct PlainVertex {
-    pub position: [f32; 3],
+#[derive(Debug)]
+pub enum RenderSandbox {
+    Assembler(Box<RenderInsnAssembler>),
+    List(Vec<RenderInstruction>),
+    None,
 }
 
-#[derive(Debug, Clone, Copy, Zeroable, Pod, PartialEq)]
-#[repr(C)]
-pub struct UVVertex {
-    pub position: [f32; 3],
-    pub uv: [f32; 2],
+impl RenderSandbox {
+    pub fn push(&mut self, insn: RenderInstruction) {
+        match self {
+            Self::Assembler(asm) => asm.feed(&[insn]),
+            Self::List(insns) => insns.push(insn),
+            Self::None => {
+                tracing::error!(
+                    what = "tried to push render instruction on invalid thread",
+                    ?insn,
+                    thread = std::thread::current().name()
+                );
+            }
+        }
+    }
+
+    pub fn get_bound_texture(&self) -> Option<i32> {
+        match self {
+            Self::Assembler(a) => a.get_active_texture(),
+            Self::List(l) => {
+                for insn in l.iter().rev() {
+                    if let RenderInstruction::BindTexture(i) = insn {
+                        return Some(*i);
+                    }
+                }
+
+                None
+            }
+            Self::None => None,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, Zeroable, Pod, PartialEq)]
-#[repr(C)]
-pub struct ColorVertex {
-    pub position: [f32; 3],
-    pub color: [f32; 4],
+pub fn push_instruction(insn: RenderInstruction) {
+    RENDER_SANDBOX.with(|lock| {
+        let mut guard = lock.lock();
+
+        guard.push(insn);
+    });
 }
 
-#[derive(Debug, Clone, Copy, Zeroable, Pod, PartialEq)]
-#[repr(C)]
-pub struct UVColorVertex {
-    pub position: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
+pub fn with_render_sandbox<F: FnOnce(&mut RenderSandbox) -> R, R>(f: F) -> R {
+    RENDER_SANDBOX.with(|lock| {
+        let mut guard = lock.lock();
+
+        f(&mut guard)
+    })
+}
+
+pub fn put_sandbox(sandbox: RenderSandbox) {
+    RENDER_SANDBOX.with(|lock| {
+        let mut guard = lock.lock();
+
+        if matches!(&*guard, RenderSandbox::None) {
+            *guard = sandbox;
+        } else {
+            panic!("tried to put_sandbox when a sandbox was already active\n({guard:?})");
+        }
+    });
+}
+
+pub fn take_sandbox() -> Option<RenderSandbox> {
+    let existing = RENDER_SANDBOX.with(|lock| {
+        let mut guard = lock.lock();
+
+        let mut none = RenderSandbox::None;
+        std::mem::swap(&mut *guard, &mut none);
+        none
+    });
+
+    if matches!(&existing, RenderSandbox::None) {
+        None
+    } else {
+        Some(existing)
+    }
 }
 
 #[repr(u32)]
@@ -68,21 +116,6 @@ pub enum PointerArrayType {
     Vertex = gl_constants::GL_VERTEX_ARRAY,
 }
 
-impl PointerArrayType {
-    pub fn is_supported(&self) -> bool {
-        match self {
-            PointerArrayType::Color => true,
-            PointerArrayType::Normal => true,
-            PointerArrayType::TexCoord => true,
-            PointerArrayType::Vertex => true,
-            PointerArrayType::EdgeFlag => false,
-            PointerArrayType::FogCoord => false,
-            PointerArrayType::ColorIndex => false,
-            PointerArrayType::SecondaryColor => false,
-        }
-    }
-}
-
 #[repr(u32)]
 #[derive(Debug, Clone, PartialEq, FromPrimitive, ToPrimitive)]
 pub enum PointerDataType {
@@ -96,35 +129,20 @@ pub enum PointerDataType {
     F64 = gl_constants::GL_DOUBLE,
 }
 
-impl PointerDataType {
-    pub fn size(&self) -> usize {
-        match self {
-            PointerDataType::U8 => 1,
-            PointerDataType::I8 => 1,
-            PointerDataType::U16 => 2,
-            PointerDataType::I16 => 2,
-            PointerDataType::U32 => 4,
-            PointerDataType::I32 => 4,
-            PointerDataType::F32 => 4,
-            PointerDataType::F64 => 8,
-        }
-    }
-}
-
 #[repr(u32)]
 #[derive(Debug, Clone, PartialEq, FromPrimitive, ToPrimitive)]
 pub enum DrawMode {
-    Points,
-    LineStrip,
-    LineLoop,
-    Lines,
-    LineStripAdj,
-    LinesAdj,
-    TriStrip,
-    TriFan,
-    Tri,
-    TriStripAdj,
-    TriAdj,
+    Points = gl_constants::GL_POINTS,
+    LineStrip = gl_constants::GL_LINE_STRIP,
+    LineLoop = gl_constants::GL_LINE_LOOP,
+    Lines = gl_constants::GL_LINES,
+    LineStripAdj = gl_constants::GL_LINE_STRIP_ADJACENCY,
+    LinesAdj = gl_constants::GL_LINES_ADJACENCY,
+    TriStrip = gl_constants::GL_TRIANGLE_STRIP,
+    TriFan = gl_constants::GL_TRIANGLE_FAN,
+    Tri = gl_constants::GL_TRIANGLES,
+    TriStripAdj = gl_constants::GL_TRIANGLE_STRIP_ADJACENCY,
+    TriAdj = gl_constants::GL_TRIANGLES_ADJACENCY,
 }
 
 structstruck::strike! {
@@ -147,25 +165,27 @@ structstruck::strike! {
         Translate {
             delta: Vec3,
         },
+        Translated {
+            delta: DVec3,
+        },
         Rotate {
             angle: f32,
             axis: Vec3,
         },
+        Rotated {
+            angle: f64,
+            axis: DVec3,
+        },
         Scale {
             scale: Vec3,
         },
+        Scaled {
+            scale: DVec3,
+        },
+
         Enable(i32),
         Disable(i32),
-        Bind2DTexture(TextureHandle),
-        SetColor {
-            /// RGBA
-            color: [f32; 4]
-        },
-        PlainQuads(Vec<PlainVertex>),
-        UVQuads(Vec<PlainVertex>),
-        PlainTris(Vec<PlainVertex>),
-        UVTris(Vec<PlainVertex>),
-        AlphaFunc,// TODO: this
+
         SetClientState {
             enabled: bool,
             array_type: PointerArrayType,
@@ -181,6 +201,21 @@ structstruck::strike! {
             mode: DrawMode,
             first: u32,
             count: u32,
-        }
+        },
+
+        SetActiveTextureUnit(usize),
+        BindTexture(i32),
+
+        TexCoord(Vec4),
+
+        SetColor(Vec4),
+
+        Begin(DrawMode),
+        Vertex(Vec4),
+        End,
+
+        AlphaFunc,
+
+        ClearDepth,
     }
 }

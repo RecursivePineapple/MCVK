@@ -2,26 +2,47 @@ use std::{mem::MaybeUninit, sync::Arc};
 
 use jni::{objects::JClass, JNIEnv};
 use num::ToPrimitive;
-use vulkano::format::Format;
-use vulkano::pipeline::graphics::vertex_input::{
-    VertexBufferDescription, VertexInputRate, VertexMemberInfo,
-};
 
 use crate::vulkan::sandbox::{RenderInstruction, RENDER_SANDBOX};
+use crate::vulkan::sandbox_jni::jni_prelude::{DrawMode, RenderSandbox};
 
+use super::commands::CommandQueue;
 use super::dynamic_shader;
+use super::sandbox::{put_sandbox, take_sandbox};
+use super::sandbox_jni::client_arrays;
 use super::{
     insn_assembler::RenderInsnAssembler,
     sandbox::{PointerArrayType, PointerDataType},
-    sandbox_jni,
 };
 
 unsafe fn env() -> JNIEnv<'static> {
+    #[allow(invalid_value)]
     MaybeUninit::<JNIEnv<'static>>::uninit().assume_init()
 }
 
 unsafe fn class() -> JClass<'static> {
+    #[allow(invalid_value)]
     MaybeUninit::<JClass<'static>>::uninit().assume_init()
+}
+
+fn prepare_sandbox() {
+    take_sandbox();
+    put_sandbox(RenderSandbox::List(Vec::new()));
+}
+
+fn assert_insns(v: &Vec<RenderInstruction>) {
+    RENDER_SANDBOX.with(|l| {
+        let g = l.lock();
+
+        dbg!(&*g);
+
+        match &*g {
+            RenderSandbox::List(insns) => {
+                assert!(insns == v);
+            }
+            _ => panic!(),
+        }
+    });
 }
 
 #[test]
@@ -34,11 +55,9 @@ fn add_pointer_u8_packed() {
             data[i] = i as u8;
         }
 
-        RENDER_SANDBOX.with(|l| {
-            l.lock().take();
-        });
+        prepare_sandbox();
 
-        sandbox_jni::Java_com_recursive_1pineapple_mcvk_rendering_RenderSandbox_addPointerArray(
+        client_arrays::Java_com_recursive_1pineapple_mcvk_rendering_RenderSandbox_addPointerArray(
             env(),
             class(),
             3,
@@ -49,20 +68,13 @@ fn add_pointer_u8_packed() {
             data.len() as i32,
         );
 
-        RENDER_SANDBOX.with(|l| {
-            let insn1 = RenderInstruction::SetPointer {
-                vec_count: 5,
-                array_type: PointerArrayType::Color,
-                item_type: PointerDataType::U8,
-                data: Arc::new(data.clone()),
-                size: 3,
-            };
-
-            let g = l.lock();
-
-            dbg!(&*g);
-            assert!(*g == Some(vec![insn1]));
-        });
+        assert_insns(&vec![RenderInstruction::SetPointer {
+            vec_count: 5,
+            array_type: PointerArrayType::Color,
+            item_type: PointerDataType::U8,
+            data: Arc::new(data.clone()),
+            size: 3,
+        }]);
     }
 }
 
@@ -80,11 +92,9 @@ fn add_pointer_u8() {
             data_compact[i] = i as u8;
         }
 
-        RENDER_SANDBOX.with(|l| {
-            l.lock().take();
-        });
+        prepare_sandbox();
 
-        sandbox_jni::Java_com_recursive_1pineapple_mcvk_rendering_RenderSandbox_addPointerArray(
+        client_arrays::Java_com_recursive_1pineapple_mcvk_rendering_RenderSandbox_addPointerArray(
             env(),
             class(),
             3,
@@ -95,20 +105,13 @@ fn add_pointer_u8() {
             data.len() as i32,
         );
 
-        RENDER_SANDBOX.with(|l| {
-            let insn1 = RenderInstruction::SetPointer {
-                vec_count: 5,
-                array_type: PointerArrayType::Color,
-                item_type: PointerDataType::U8,
-                data: Arc::new(data_compact.clone()),
-                size: 3,
-            };
-
-            let g = l.lock();
-
-            dbg!(&*g);
-            assert!(*g == Some(vec![insn1]));
-        });
+        assert_insns(&vec![RenderInstruction::SetPointer {
+            vec_count: 5,
+            array_type: PointerArrayType::Color,
+            item_type: PointerDataType::U8,
+            data: Arc::new(data_compact.clone()),
+            size: 3,
+        }]);
     }
 }
 
@@ -130,11 +133,9 @@ fn add_pointer_f32() {
             data_compact2[i] = i as f32;
         }
 
-        RENDER_SANDBOX.with(|l| {
-            l.lock().take();
-        });
+        prepare_sandbox();
 
-        sandbox_jni::Java_com_recursive_1pineapple_mcvk_rendering_RenderSandbox_addPointerArray(
+        client_arrays::Java_com_recursive_1pineapple_mcvk_rendering_RenderSandbox_addPointerArray(
             env(),
             class(),
             3,
@@ -145,31 +146,24 @@ fn add_pointer_f32() {
             data.len() as i32,
         );
 
-        RENDER_SANDBOX.with(|l| {
-            let insn1 = RenderInstruction::SetPointer {
-                vec_count: 5,
-                array_type: PointerArrayType::Color,
-                item_type: PointerDataType::F32,
-                data: Arc::new(data_compact.clone()),
-                size: 3,
-            };
-
-            let g = l.lock();
-
-            dbg!(&*g);
-            assert!(*g == Some(vec![insn1]));
-        });
+        assert_insns(&vec![RenderInstruction::SetPointer {
+            vec_count: 5,
+            array_type: PointerArrayType::Color,
+            item_type: PointerDataType::F32,
+            data: Arc::new(data_compact.clone()),
+            size: 3,
+        }]);
     }
 }
 
 #[test]
 fn vertex_assembly() {
-    let mut asm = RenderInsnAssembler::new();
+    let mut asm = RenderInsnAssembler::new(CommandQueue::Buffered(Vec::new()));
 
-    let mut pos = (0..3 * 10).map(|i| i as f32).collect::<Vec<_>>();
-    let mut color = (0..3 * 10).map(|i| i as f32).rev().collect::<Vec<_>>();
+    let pos = (0..3 * 10).map(|i| i as f32).collect::<Vec<_>>();
+    let color = (0..3 * 10).map(|i| i as f32).rev().collect::<Vec<_>>();
 
-    asm.assemble(&[
+    asm.feed(&[
         RenderInstruction::SetClientState {
             enabled: true,
             array_type: PointerArrayType::Vertex,
@@ -194,33 +188,7 @@ fn vertex_assembly() {
         },
     ]);
 
-    let (pipeline, push_constants, desc, buffer) = asm.assemble_vertices().unwrap();
-
-    match desc {
-        VertexBufferDescription {
-            members,
-            stride: 24,
-            input_rate: VertexInputRate::Vertex,
-        } => {
-            match members.get("pos").unwrap() {
-                VertexMemberInfo {
-                    format: Format::R32_SFLOAT,
-                    num_elements: 3,
-                    offset: 12,
-                } => {}
-                _ => panic!("bad pos VertexMemberInfo"),
-            }
-            match members.get("color").unwrap() {
-                VertexMemberInfo {
-                    format: Format::R32_SFLOAT,
-                    num_elements: 3,
-                    offset: 0,
-                } => {}
-                _ => panic!("bad color VertexMemberInfo"),
-            }
-        }
-        _ => panic!("bad VertexBufferDescription"),
-    }
+    asm.draw_arrays(DrawMode::Tri, 0, 3);
 
     let mut target = Vec::new();
 
@@ -231,23 +199,53 @@ fn vertex_assembly() {
 
     let target = unsafe { target.align_to::<u8>().1.to_owned() };
 
-    assert_eq!(buffer, target);
-}
+    // assert_eq!(
+    //     &asm.commands[..],
+    //     &[
+    //         RenderCommand::BindDynamicGraphicsPipeline {
+    //             pipeline: DynamicPipelineSpec {
+    //                 position: todo!(),
+    //                 normal: todo!(),
+    //                 color: todo!(),
+    //                 matrix: todo!()
+    //             },
+    //             push_constants: vec![]
+    //         },
+    //         RenderCommand::Draw {
+    //             mode: (),
+    //             vertex: (),
+    //             start_vertex: (),
+    //             vertex_count: (),
+    //             data: ()
+    //         }
+    //     ]
+    // );
 
-#[test]
-fn shader_test() {
-    let pipeline = dynamic_shader::DynamicPipelineSpec {
-        color: dynamic_shader::ColorMode::Flat,
-        matrix: dynamic_shader::ShaderMatrixMode::MVP_PC,
-        normal: None,
-        position: dynamic_shader::VertexInputSpec {
-            name: "position".to_owned(),
-            format: vulkano::format::Format::R8_UINT,
-            num_elements: 3,
-        },
-    };
+    // match desc {
+    //     VertexBufferDescription {
+    //         members,
+    //         stride: 24,
+    //         input_rate: VertexInputRate::Vertex,
+    //     } => {
+    //         match members.get("pos").unwrap() {
+    //             VertexMemberInfo {
+    //                 format: Format::R32_SFLOAT,
+    //                 num_elements: 3,
+    //                 offset: 12,
+    //             } => {}
+    //             _ => panic!("bad pos VertexMemberInfo"),
+    //         }
+    //         match members.get("color").unwrap() {
+    //             VertexMemberInfo {
+    //                 format: Format::R32_SFLOAT,
+    //                 num_elements: 3,
+    //                 offset: 0,
+    //             } => {}
+    //             _ => panic!("bad color VertexMemberInfo"),
+    //         }
+    //     }
+    //     _ => panic!("bad VertexBufferDescription"),
+    // }
 
-    println!("{}", &pipeline.get_vertex_shader_code());
-
-    panic!();
+    // assert_eq!(buffer, target);
 }

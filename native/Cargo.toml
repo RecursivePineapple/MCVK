@@ -16,26 +16,33 @@ enum_primitive = "0.1"
 structstruck = "0.4"
 derivative = "2.2"
 
+fastset = "0.4"
+
 serde = "1.0"
-bincode = "1.3"
+serde_json = "1.0"
+# bincode = "1.3"
+
+tokio = { version = "1.40", features = ["full"] }
 
 jni = "0.21"
 
 native-macros = { path = "./native-macros" }
 
 bytemuck = "1.15"
-nalgebra = "*"
+nalgebra = { version = "0.32", features = ["bytemuck"] }
 nalgebra-glm = "0.18"
+smallvec = "1.13"
+
 num = "0.4"
 num-derive = "0.4"
 num-traits = "0.2"
 
 gl_constants = "0.1.1"
 
-glfw = { version = "0.55", features = ["vulkan"] }
+glfw = { version = "0", features = ["vulkan"] }
 
 vulkano = "0.34"
-ash = "*"
+ash = "0.37"
 
 vulkano-shaders = "0.34"
 shaderc = "0.8"

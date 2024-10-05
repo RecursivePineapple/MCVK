@@ -1,10 +1,10 @@
-use std::{
-    hash::Hash,
-    mem::{discriminant, transmute},
-};
+use std::{hash::Hash, mem::discriminant, sync::Arc};
 
 use nalgebra_glm::{TMat4, Vec4};
-use vulkano::format::Format;
+use vulkano::{
+    format::Format,
+    pipeline::{GraphicsPipeline, PipelineLayout},
+};
 
 #[derive(Debug, Clone, PartialEq, Hash)]
 pub struct VertexInputSpec {
@@ -23,7 +23,7 @@ pub enum ShaderMatrixMode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColorMode {
-    Flat,
+    Flat_PC,
     Texture(Option<VertexInputSpec>),
     Array(VertexInputSpec),
 }
@@ -32,7 +32,7 @@ impl Hash for ColorMode {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         discriminant(self).hash(state);
         match self {
-            ColorMode::Flat => {}
+            ColorMode::Flat_PC => {}
             ColorMode::Texture(texture) => texture.hash(state),
             ColorMode::Array(array) => array.hash(state),
         }
@@ -42,7 +42,7 @@ impl Hash for ColorMode {
 #[derive(Debug, Clone)]
 pub enum DynamicPipelinePushConstants {
     // MVPSeparate { model: TMat4<f32>, vp: TMat4<f32> },
-    MVP(TMat4<f32>),
+    MVP(TMat4<f64>),
     Color(Vec4),
 }
 
@@ -198,7 +198,7 @@ impl DynamicPipelineSpec {
         }
 
         match &self.color {
-            ColorMode::Flat => {}
+            ColorMode::Flat_PC => {}
             ColorMode::Texture(Some(texcoord)) => {
                 Self::append_io(
                     &mut code,
@@ -232,14 +232,14 @@ impl DynamicPipelineSpec {
             }
         }
 
-        if let ColorMode::Flat = &self.color {
+        if let ColorMode::Flat_PC = &self.color {
             code += "  vec4 color;\n";
         }
 
         code += "} PushConstants;\n";
 
         match &self.color {
-            ColorMode::Flat | ColorMode::Array(_) => {
+            ColorMode::Flat_PC | ColorMode::Array(_) => {
                 Self::append_io(&mut code, 0, false, &ShaderDataType::Float(4), "frag_color");
             }
             ColorMode::Texture(Some(_)) => {
@@ -279,6 +279,14 @@ impl DynamicPipelineSpec {
             }
         }
 
+        match &self.color {
+            ColorMode::Flat_PC => {
+                code += "  frag_color = color;";
+            }
+            ColorMode::Texture(texcoords) => {}
+            ColorMode::Array(_) => todo!(),
+        }
+
         code += "}\n";
 
         code
@@ -292,3 +300,14 @@ impl DynamicPipelineSpec {
         code
     }
 }
+
+pub struct DynamicPipeline {
+    pub spec: DynamicPipelineSpec,
+
+    pub pipeline: Arc<GraphicsPipeline>,
+    pub layout: Arc<PipelineLayout>,
+}
+
+pub struct DynamicPipelineCache {}
+
+impl DynamicPipelineCache {}

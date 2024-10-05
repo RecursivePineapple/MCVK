@@ -1,33 +1,29 @@
 use std::array::from_fn;
 use std::{collections::HashMap, sync::Arc};
 
-use nalgebra::{ComplexField, Orthographic3, UnitQuaternion};
-use nalgebra_glm::{Quat, TMat4, Vec3};
-use num::FromPrimitive;
+use fastset::Set;
+use nalgebra::{Orthographic3, UnitQuaternion};
+use nalgebra_glm::{DVec3, TMat4, Vec3, Vec4};
+
 use vulkano::format::Format;
-use vulkano::{
-    command_buffer::AutoCommandBufferBuilder,
-    pipeline::{
-        graphics::vertex_input::{
-            BuffersDefinition, VertexBufferDescription, VertexInputRate, VertexInputState,
-            VertexMemberInfo,
-        },
-        GraphicsPipeline,
-    },
+use vulkano::pipeline::graphics::vertex_input::{
+    VertexBufferDescription, VertexInputRate, VertexMemberInfo,
 };
 
+use super::commands::CommandQueue;
 use super::dynamic_shader::{
     ColorMode, DynamicPipelinePushConstants, DynamicPipelineSpec, ShaderMatrixMode, VertexInputSpec,
 };
-use super::textures::textures::TextureHandle;
+use super::sandbox_jni::jni_prelude::DrawMode;
 use super::{
     commands::RenderCommand,
     sandbox::{MatrixMode, OrthoData, PointerArrayType, PointerDataType, RenderInstruction},
 };
 
+#[derive(Debug)]
 struct MatrixStack {
     pub top: usize,
-    pub matrices: Vec<TMat4<f32>>,
+    pub matrices: Vec<TMat4<f64>>,
 }
 
 impl MatrixStack {
@@ -53,7 +49,7 @@ impl MatrixStack {
         }
     }
 
-    pub fn get(&self) -> &TMat4<f32> {
+    pub fn get(&self) -> &TMat4<f64> {
         &self.matrices[self.top]
     }
 
@@ -62,16 +58,30 @@ impl MatrixStack {
     }
 
     pub fn translate(&mut self, v: &Vec3) {
-        self.matrices[self.top].append_translation_mut(v);
+        self.matrices[self.top].append_translation_mut(&v.cast::<f64>());
+    }
+
+    pub fn translated(&mut self, v: &DVec3) {
+        self.matrices[self.top].append_translation_mut(&v);
     }
 
     pub fn scale(&mut self, v: &Vec3) {
-        self.matrices[self.top].append_nonuniform_scaling_mut(v);
+        self.matrices[self.top].append_nonuniform_scaling_mut(&v.cast::<f64>());
+    }
+
+    pub fn scaled(&mut self, v: &DVec3) {
+        self.matrices[self.top].append_nonuniform_scaling_mut(&v);
     }
 
     pub fn rotate(&mut self, axis: &Vec3, angle: f32) {
         let q = UnitQuaternion::new(axis.normalize() * angle);
         let qm: TMat4<f32> = q.to_rotation_matrix().into();
+        self.matrices[self.top] = qm.cast::<f64>() * self.matrices[self.top];
+    }
+
+    pub fn rotated(&mut self, axis: &DVec3, angle: f64) {
+        let q = UnitQuaternion::new(axis.normalize() * angle);
+        let qm: TMat4<f64> = q.to_rotation_matrix().into();
         self.matrices[self.top] = qm * self.matrices[self.top];
     }
 
@@ -84,10 +94,11 @@ impl MatrixStack {
             params.z_near,
             params.z_far,
         );
-        self.matrices[self.top] = m.as_matrix() * self.matrices[self.top];
+        self.matrices[self.top] = m.as_matrix().cast::<f64>() * self.matrices[self.top];
     }
 }
 
+#[derive(Debug)]
 struct ClientArray {
     pub enabled: bool,
     pub vec_count: u32,
@@ -172,113 +183,138 @@ fn get_client_array_name(index: usize) -> &'static str {
     }
 }
 
+impl RenderInstruction {
+    pub fn is_matrix_mutation(&self) -> bool {
+        match self {
+            RenderInstruction::PushMatrix => true,
+            RenderInstruction::PopMatrix => true,
+            RenderInstruction::LoadIdentity => true,
+            RenderInstruction::Ortho { .. } => true,
+            RenderInstruction::Translate { .. } => true,
+            RenderInstruction::Translated { .. } => true,
+            RenderInstruction::Rotate { .. } => true,
+            RenderInstruction::Rotated { .. } => true,
+            RenderInstruction::Scale { .. } => true,
+            RenderInstruction::Scaled { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct VertexBufferSlot<'a> {
     pub array: &'a ClientArray,
     pub array_type: PointerArrayType,
     pub buffer_offset: u32,
 }
 
+#[derive(Debug)]
+struct TextureUnit {
+    pub bound_texture: Option<i32>,
+}
+
+impl TextureUnit {
+    pub fn new() -> Self {
+        Self {
+            bound_texture: None,
+        }
+    }
+}
+
+const MAX_TEXTURE_UNITS: usize = 16;
+
+#[derive(Debug)]
 pub struct RenderInsnAssembler {
+    active_flags: Set,
+
     active_matrix: usize,
     matrix_stacks: [MatrixStack; 4],
-    active_mvp_cache: Option<TMat4<f32>>,
+    active_mvp_cache: Option<TMat4<f64>>,
 
-    active_texture: Option<TextureHandle>,
+    active_unit: usize,
+    texture_units: [TextureUnit; MAX_TEXTURE_UNITS],
 
-    active_color: [f32; 4],
+    active_color: Vec4,
+    texcoord: Vec4,
 
     client_arrays: [ClientArray; 8],
+
+    pub commands: CommandQueue,
 }
 
 impl RenderInsnAssembler {
-    pub fn new() -> Self {
+    pub fn new(commands: CommandQueue) -> Self {
         Self {
+            active_flags: Set::with_capacity(64),
+
             active_matrix: 0,
             matrix_stacks: from_fn(|_| MatrixStack::new()),
             active_mvp_cache: None,
-            active_texture: None,
-            active_color: [1.0; 4],
+
+            active_unit: 0,
+            texture_units: from_fn(|_| TextureUnit::new()),
+
+            active_color: [1.0; 4].into(),
+            texcoord: [0.0; 4].into(),
+
             client_arrays: from_fn(|_| ClientArray::new()),
+
+            commands,
         }
     }
 
-    pub fn assemble(&mut self, insns: &[RenderInstruction]) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
+    pub fn feed(&mut self, insns: &[RenderInstruction]) {
         for insn in insns {
+            if insn.is_matrix_mutation()
+                && (self.active_matrix == PROJECTION_MATRIX_IDX
+                    || self.active_matrix == MODELVIEW_MATRIX_IDX)
+            {
+                self.active_mvp_cache.take();
+            }
+
             match insn {
                 RenderInstruction::MatrixMode(mode) => {
                     self.active_matrix = get_matrix_index(mode);
                 }
                 RenderInstruction::PushMatrix => {
                     self.matrix_stacks[self.active_matrix].push();
-                    if self.active_matrix == PROJECTION_MATRIX_IDX
-                        || self.active_matrix == MODELVIEW_MATRIX_IDX
-                    {
-                        self.active_mvp_cache.take();
-                    }
                 }
                 RenderInstruction::PopMatrix => {
                     self.matrix_stacks[self.active_matrix].pop();
-                    if self.active_matrix == PROJECTION_MATRIX_IDX
-                        || self.active_matrix == MODELVIEW_MATRIX_IDX
-                    {
-                        self.active_mvp_cache.take();
-                    }
                 }
                 RenderInstruction::LoadIdentity => {
                     self.matrix_stacks[self.active_matrix].load_identity();
-                    if self.active_matrix == PROJECTION_MATRIX_IDX
-                        || self.active_matrix == MODELVIEW_MATRIX_IDX
-                    {
-                        self.active_mvp_cache.take();
-                    }
                 }
                 RenderInstruction::Ortho { data } => {
                     self.matrix_stacks[self.active_matrix].ortho(&*data);
-                    if self.active_matrix == PROJECTION_MATRIX_IDX
-                        || self.active_matrix == MODELVIEW_MATRIX_IDX
-                    {
-                        self.active_mvp_cache.take();
-                    }
                 }
                 RenderInstruction::Translate { delta } => {
                     self.matrix_stacks[self.active_matrix].translate(delta);
-                    if self.active_matrix == PROJECTION_MATRIX_IDX
-                        || self.active_matrix == MODELVIEW_MATRIX_IDX
-                    {
-                        self.active_mvp_cache.take();
-                    }
+                }
+                RenderInstruction::Translated { delta } => {
+                    self.matrix_stacks[self.active_matrix].translated(delta);
                 }
                 RenderInstruction::Rotate { angle, axis } => {
                     self.matrix_stacks[self.active_matrix].rotate(axis, *angle);
-                    if self.active_matrix == PROJECTION_MATRIX_IDX
-                        || self.active_matrix == MODELVIEW_MATRIX_IDX
-                    {
-                        self.active_mvp_cache.take();
-                    }
+                }
+                RenderInstruction::Rotated { angle, axis } => {
+                    self.matrix_stacks[self.active_matrix].rotated(axis, *angle);
                 }
                 RenderInstruction::Scale { scale } => {
                     self.matrix_stacks[self.active_matrix].scale(scale);
-                    if self.active_matrix == PROJECTION_MATRIX_IDX
-                        || self.active_matrix == MODELVIEW_MATRIX_IDX
-                    {
-                        self.active_mvp_cache.take();
-                    }
                 }
-                RenderInstruction::Enable(_) => todo!(),
-                RenderInstruction::Disable(_) => todo!(),
-                RenderInstruction::Bind2DTexture(id) => {
-                    self.active_texture = Some(id.clone());
+                RenderInstruction::Scaled { scale } => {
+                    self.matrix_stacks[self.active_matrix].scaled(scale);
                 }
-                RenderInstruction::SetColor { color } => {
-                    self.active_color = color.clone();
+
+                RenderInstruction::Enable(param) => {
+                    self.active_flags.insert(*param as usize);
                 }
-                RenderInstruction::PlainQuads(_) => todo!(),
-                RenderInstruction::UVQuads(_) => todo!(),
-                RenderInstruction::PlainTris(_) => todo!(),
-                RenderInstruction::UVTris(_) => todo!(),
-                RenderInstruction::AlphaFunc => todo!(),
+                RenderInstruction::Disable(param) => {
+                    let param = *param as usize;
+                    self.active_flags.remove(&param);
+                }
+
                 RenderInstruction::SetClientState {
                     enabled,
                     array_type,
@@ -299,28 +335,42 @@ impl RenderInsnAssembler {
                     array.data = Some(data.clone());
                 }
                 RenderInstruction::DrawArrays { mode, first, count } => {
-                    if let Some((pipeline, push_constants, vertex, data)) = self.assemble_vertices()
-                    {
-                        cmds.push(RenderCommand::BindDynamicGraphicsPipeline {
-                            pipeline,
-                            push_constants: Vec::new(), // TODO: this
-                        });
-                        cmds.push(RenderCommand::Draw {
-                            mode: mode.clone(),
-                            vertex,
-                            start_vertex: *first,
-                            vertex_count: *count,
-                            data: Arc::new(data),
-                        });
+                    self.draw_arrays(mode.clone(), *first, *count);
+                }
+
+                RenderInstruction::SetActiveTextureUnit(unit) => {
+                    self.active_unit = *unit;
+                }
+                RenderInstruction::BindTexture(id) => {
+                    if *id == 0 {
+                        self.texture_units[self.active_unit].bound_texture = None;
+                    } else {
+                        self.texture_units[self.active_unit].bound_texture = Some(*id);
                     }
+                }
+
+                RenderInstruction::TexCoord(coord) => {
+                    self.texcoord = coord.clone();
+                }
+
+                RenderInstruction::SetColor(color) => {
+                    self.active_color = color.clone();
+                }
+
+                RenderInstruction::Begin(mode) => todo!(),
+                RenderInstruction::Vertex(v) => todo!(),
+                RenderInstruction::End => todo!(),
+
+                RenderInstruction::AlphaFunc => todo!(),
+
+                RenderInstruction::ClearDepth => {
+                    self.commands.push(RenderCommand::ClearDepth);
                 }
             }
         }
-
-        cmds
     }
 
-    fn get_mvp_matrix(&mut self) -> TMat4<f32> {
+    fn get_mvp_matrix(&mut self) -> TMat4<f64> {
         if let Some(mat) = self.active_mvp_cache.as_ref() {
             return mat.clone();
         }
@@ -357,7 +407,12 @@ impl RenderInsnAssembler {
 
                 if let Some(vc) = &vertex_count {
                     if array.vec_count != *vc {
-                        // TODO: warn length mismatch
+                        tracing::warn!(
+                            what = "found client array length mismatch",
+                            array = get_client_array_name(i),
+                            array_length = array.vec_count,
+                            expected_length = *vc,
+                        );
                         if array.vec_count < *vc {
                             vertex_count = Some(array.vec_count);
                         }
@@ -393,19 +448,17 @@ impl RenderInsnAssembler {
         (desc, layout, vertex_count)
     }
 
-    pub fn assemble_vertices(
-        &mut self,
-    ) -> Option<(
-        DynamicPipelineSpec,
-        Vec<DynamicPipelinePushConstants>,
-        VertexBufferDescription,
-        Vec<u8>,
-    )> {
+    pub fn draw_arrays(&mut self, mode: DrawMode, first: u32, count: u32) {
         let (desc, layout, vertex_count) = self.get_vertex_buffer_layout();
-        let vertex_count = vertex_count? as usize;
+        let vertex_count = match vertex_count {
+            Some(v) => v as usize,
+            None => {
+                return;
+            }
+        };
 
         let mut buffer = Vec::new();
-        buffer.resize(vertex_count * desc.stride as usize, 0);
+        buffer.resize(vertex_count * (desc.stride as usize), 0);
 
         for i in 0..vertex_count {
             for array in &layout {
@@ -474,8 +527,8 @@ impl RenderInsnAssembler {
             }
         }
 
-        let mut pipeline = DynamicPipelineSpec {
-            color: ColorMode::Flat,
+        let pipeline = DynamicPipelineSpec {
+            color: ColorMode::Flat_PC,
             matrix: ShaderMatrixMode::MVP_PC,
             normal: None,
             position: VertexInputSpec {
@@ -489,12 +542,28 @@ impl RenderInsnAssembler {
 
         push_constants.push(DynamicPipelinePushConstants::MVP(self.get_mvp_matrix()));
 
-        if matches!(pipeline.color, ColorMode::Flat) {
+        if matches!(pipeline.color, ColorMode::Flat_PC) {
             push_constants.push(DynamicPipelinePushConstants::Color(
                 self.active_color.clone().into(),
             ));
         }
 
-        Some((pipeline, push_constants, desc, buffer))
+        self.commands
+            .push(RenderCommand::BindDynamicGraphicsPipeline {
+                pipeline,
+                push_constants,
+            });
+
+        self.commands.push(RenderCommand::Draw {
+            mode: mode.clone(),
+            vertex: desc,
+            start_vertex: first,
+            vertex_count: count,
+            data: Arc::new(buffer),
+        });
+    }
+
+    pub fn get_active_texture(&self) -> Option<i32> {
+        self.texture_units[self.active_unit].bound_texture.clone()
     }
 }

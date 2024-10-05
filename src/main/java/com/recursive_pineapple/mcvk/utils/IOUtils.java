@@ -10,7 +10,6 @@ public class IOUtils {
     }
 
     public static byte[] readStreamToBytes(InputStream is, ByteArrayOutputStream staging, byte[] buffer) throws IOException {
-
         int len;
 
         while ((len = is.read(buffer)) != -1) {

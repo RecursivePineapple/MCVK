@@ -1,24 +1,128 @@
-use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::sync::RwLock;
+use std::sync::RwLockReadGuard;
 
-use crate::vulkan::instance::CreateWindowSurface;
-use crate::vulkan::instance::GLFWFns;
-use crate::vulkan::instance::GetPhysicalDevicePresentationSupport;
-use crate::vulkan::instance::GetRequiredInstanceExtensions;
-use crate::vulkan::instance::GetWindowSize;
-use crate::vulkan::instance::Sprite;
-use crate::vulkan::instance::VsyncMode;
-use crate::vulkan::instance::VulkanInstance;
-use crate::vulkan::textures::textures::AnimationMetadata;
-use enum_primitive::FromPrimitive;
-use image::Rgba;
-use image::RgbaImage;
-use jni::objects::*;
-use jni::sys::*;
-use jni::JNIEnv;
-use native_macros::jni_export;
+use anyhow::Context;
+
+use crate::vulkan::glfw_window::CreateWindowSurface;
+use crate::vulkan::glfw_window::GLFWFns;
+use crate::vulkan::glfw_window::GLFWWindow;
+use crate::vulkan::glfw_window::GetPhysicalDevicePresentationSupport;
+use crate::vulkan::glfw_window::GetRequiredInstanceExtensions;
+use crate::vulkan::glfw_window::GetWindowSize;
+use crate::vulkan::sandbox_jni::jni_prelude::*;
+use crate::vulkan::swapchain::VsyncMode;
+
+macro_rules! field_cache {
+    {name: $name:ident, class: $class:literal, fields: { $($rust_name:ident / $ret_name:ident => $java_name:literal / $sig:literal),* $(,)? }} => {
+
+        struct $name {
+            $(pub $rust_name: jni::objects::JFieldID,)*
+            $(pub $ret_name: jni::signature::ReturnType,)*
+        }
+
+        impl $name {
+            pub fn get(env: &mut JNIEnv<'_>) -> &'static Self {
+                static CACHE: std::sync::OnceLock<$name> = std::sync::OnceLock::new();
+
+                CACHE.get_or_init(|| {
+                    let class = env.find_class($class).unwrap();
+                    Self {
+                        $($rust_name: env.get_field_id(&class, $java_name, $sig).unwrap(),)*
+                        $($ret_name: <jni::signature::ReturnType as std::str::FromStr>::from_str($sig).unwrap(),)*
+                    }
+                })
+            }
+        }
+    };
+}
+
+macro_rules! throw {
+    ($env:expr, $res:expr) => {
+        match { $res } {
+            Ok(x) => x,
+            Err(e) => {
+                $env.throw_new("java/lang/RuntimeException", e.to_string())
+                    .unwrap();
+
+                return Default::default();
+            }
+        }
+    };
+}
+
+macro_rules! jni_bail {
+    ($env:expr, $message:expr) => {
+        $env.throw_new("java/lang/RuntimeException", ($message).to_string())
+            .unwrap();
+
+        return Default::default();
+    };
+}
+
+macro_rules! function {
+    () => {{
+        fn f() {}
+        fn type_name_of<T>(_: T) -> &'static str {
+            std::any::type_name::<T>()
+        }
+        let name = type_name_of(f);
+        name.strip_suffix("::f").unwrap()
+    }};
+}
+
+macro_rules! jni_todo {
+    ($env:expr, $message:literal) => {
+        $env.throw_new("java/lang/RuntimeException", ($message).to_string())
+            .unwrap();
+
+        return Default::default();
+    };
+    ($env:expr) => {
+        $env.throw_new(
+            "java/lang/RuntimeException",
+            format!("{} is not yet implemented", function!()),
+        )
+        .unwrap();
+
+        return Default::default();
+    };
+}
+
+pub static INSTANCE: RwLock<Option<MCVK>> = RwLock::new(None);
+
+macro_rules! read_instance_into {
+    ($var:ident) => {
+        let $var = crate::jni::INSTANCE.read().unwrap();
+        let $var = ($var).as_ref().unwrap();
+    };
+}
+
+macro_rules! write_instance_into {
+    ($var:ident) => {
+        let mut $var = crate::jni::INSTANCE.write().unwrap();
+        let $var: &mut MCVK = ($var).as_mut().unwrap();
+    };
+}
+
+macro_rules! read_field_into {
+    ($var:ident ; $($field:ident);*) => {
+        let $var = crate::jni::INSTANCE.read().unwrap();
+        let $var = ($var).as_ref().unwrap();
+        $(let $field = $var.$field.borrow();)*
+    };
+}
+
+macro_rules! write_field_into {
+    ($var:ident ; $($field:ident);*) => {
+        let $var = crate::jni::INSTANCE.read().unwrap();
+        let $var = ($var).as_ref().unwrap();
+        $(let mut $field = $var.$field.borrow_mut();)*
+    };
+}
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-unsafe fn createInstance(
+unsafe fn initialize(
     mut env: JNIEnv<'_>,
     _: JClass<'_>,
     window_ptr: jlong,
@@ -26,43 +130,38 @@ unsafe fn createInstance(
     get_physical_device_presentation_support: GetPhysicalDevicePresentationSupport,
     create_window_surface: CreateWindowSurface,
     get_window_size: GetWindowSize,
-) -> jlong {
-    let inst = VulkanInstance::new(
-        window_ptr as *mut glfw::ffi::GLFWwindow,
-        GLFWFns {
+) {
+    let mut l = INSTANCE.write().unwrap();
+
+    if l.is_some() {
+        jni_bail!(env, "instance was already initialized");
+    }
+
+    let window = Arc::new(RefCell::new(GLFWWindow {
+        glfw: GLFWFns {
             get_required_instance_extensions,
             get_physical_device_presentation_support,
             create_window_surface,
             get_window_size,
         },
-    );
+        window: window_ptr as *mut glfw::ffi::GLFWwindow,
+    }));
 
-    match inst {
-        Ok(inst) => Box::into_raw(Box::new(inst)) as jlong,
-        Err(e) => {
-            env.throw_new(
-                "java/lang/RuntimeException",
-                format!("could not create vulkan instance: {e}"),
-            )
-            .unwrap();
+    let inst = MCVK::new(window);
 
-            0
-        }
-    }
+    let inst = throw!(env, inst.context("could not create vulkan instance"));
+
+    l.replace(inst);
 }
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn destroyInstance(_: JNIEnv<'_>, _: JClass<'_>, ptr: jlong) {
-    drop(Box::<VulkanInstance>::from_raw(ptr as *mut VulkanInstance));
-}
-
-unsafe fn get_inst(ptr: jlong) -> &'static mut VulkanInstance {
-    Box::leak(Box::<VulkanInstance>::from_raw(ptr as *mut VulkanInstance))
+pub unsafe fn cleanup(_: JNIEnv<'_>, _: JClass<'_>) {
+    INSTANCE.write().unwrap().take();
 }
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn setMaxFPS(_: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, max_fps: jint) {
-    let inst = get_inst(ptr);
+pub unsafe fn setMaxFPS(_: JNIEnv<'_>, _: JClass<'_>, max_fps: jint) {
+    write_instance_into!(inst);
 
     inst.set_max_fps(if max_fps <= 0 {
         None
@@ -72,203 +171,8 @@ pub unsafe fn setMaxFPS(_: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, max_fps: jint)
 }
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn setVsyncMode(_: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, vsync_mode: jint) {
-    let inst = get_inst(ptr);
+pub unsafe fn setVsyncMode(_: JNIEnv<'_>, _: JClass<'_>, vsync_mode: jint) {
+    write_instance_into!(inst);
 
     inst.set_vsync(VsyncMode::from_i32(vsync_mode).unwrap());
-}
-
-#[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn startFrame(_: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, mc: JObject<'_>) {
-    let inst = get_inst(ptr);
-
-    inst.start_frame(mc);
-}
-
-#[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn finishFrame(_: JNIEnv<'_>, _: JClass<'_>, ptr: jlong) {
-    let inst = get_inst(ptr);
-
-    inst.finish_frame();
-}
-
-macro_rules! field_cache {
-    {name: $name:ident, class: $class:literal, fields: { $($rust_name:ident => $java_name:literal / $sig:literal),* $(,)? }} => {
-
-        struct $name {
-            $(pub $rust_name: JFieldID),*
-        }
-
-        impl $name {
-            pub fn get(env: &mut JNIEnv<'_>) -> &'static Self {
-                static CACHE: OnceLock<$name> = OnceLock::new();
-
-                CACHE.get_or_init(|| {
-                    let class = env.find_class($class).unwrap();
-                    Self {
-                        $($rust_name: env.get_field_id(&class, $java_name, $sig).unwrap()),*
-                    }
-                })
-            }
-        }
-
-    };
-}
-
-field_cache! {
-    name: AnimationMetadataSectionFields,
-    class: "net/minecraft/client/resources/data/AnimationMetadataSection",
-    fields: {
-        animation_frames => "animationFrames" / "Ljava/util/List;",
-        frame_width => "frameWidth" / "I",
-        frame_height => "frameHeight" / "I",
-        frame_time => "frameTime" / "I",
-    }
-}
-
-field_cache! {
-    name: AnimationFrameFields,
-    class: "net/minecraft/client/resources/data/AnimationFrame",
-    fields: {
-        frame_index => "frameIndex" / "I",
-        frame_time => "frameTime" / "I",
-    }
-}
-
-fn get_animation_metadata(
-    env: &mut JNIEnv<'_>,
-    animation: JObject<'_>,
-) -> Option<AnimationMetadata> {
-    None
-}
-
-#[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn enqueueMissingSprite(env: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, name: JString<'_>) {
-    let inst = get_inst(ptr);
-
-    inst.enqueue_sprite(
-        env.get_string_unchecked(&name).unwrap().into(),
-        Sprite::Missing,
-    );
-}
-
-#[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn enqueueFrameSprite(
-    mut env: JNIEnv<'_>,
-    _: JClass<'_>,
-    ptr: jlong,
-    name: JString<'_>,
-    width: jint,
-    height: jint,
-    frames: JObjectArray<'_>,
-    animation: JObject<'_>,
-) {
-    let width = width as usize;
-    let height = height as usize;
-    let inst = get_inst(ptr);
-
-    let frame_count = env.get_array_length(&frames).unwrap();
-
-    let mut images = Vec::new();
-
-    for i in 0..frame_count {
-        let mips: JObjectArray<'_> = env.get_object_array_element(&frames, i).unwrap().into();
-        let image: JIntArray = env.get_object_array_element(&mips, 0).unwrap().into();
-
-        let frame = {
-            let pixels = env
-                .get_array_elements(&image, ReleaseMode::NoCopyBack)
-                .unwrap();
-
-            pixels.to_owned()
-        };
-
-        if width * height != frame.len() {
-            env.throw_new(
-                "java/lang/RuntimeException",
-                format!(
-                    "frame {i} had the wrong size image at mipmap level 0; width = {width}, height = {height}, expected pixels = {}, actual pixels = {}",
-                    width * height,
-                    frame.len()
-                ),
-            )
-            .unwrap();
-        }
-
-        let mut image = RgbaImage::new(width as u32, height as u32);
-
-        for (pixel, argb) in frame.iter().enumerate() {
-            let [a, r, g, b] = argb.to_be_bytes();
-
-            image.put_pixel(
-                (pixel % width) as u32,
-                (pixel / width) as u32,
-                Rgba([r, g, b, a]),
-            );
-        }
-
-        images.push(image);
-    }
-
-    if images.len() > 1 {
-        inst.enqueue_sprite(
-            env.get_string_unchecked(&name).unwrap().into(),
-            Sprite::Frames {
-                frames: images,
-                animation: get_animation_metadata(&mut env, animation),
-            },
-        );
-    } else {
-        inst.enqueue_sprite(
-            env.get_string_unchecked(&name).unwrap().into(),
-            Sprite::Image {
-                image: images.remove(0),
-                animation: get_animation_metadata(&mut env, animation),
-            },
-        );
-    }
-}
-
-#[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn enqueueRawSprite(
-    mut env: JNIEnv<'_>,
-    _: JClass<'_>,
-    ptr: jlong,
-    name: JString<'_>,
-    image: JByteBuffer<'_>,
-    animation: JObject<'_>,
-) {
-    let inst = get_inst(ptr);
-
-    let image = std::slice::from_raw_parts(
-        env.get_direct_buffer_address(&image).unwrap(),
-        env.get_direct_buffer_capacity(&image).unwrap(),
-    );
-
-    inst.enqueue_sprite(
-        env.get_string_unchecked(&name).unwrap().into(),
-        Sprite::Data {
-            data: image.to_owned(),
-            animation: get_animation_metadata(&mut env, animation),
-        },
-    );
-}
-
-#[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn loadSprites(
-    mut env: JNIEnv<'_>,
-    _: JClass<'_>,
-    ptr: jlong,
-    mipmap_levels: jint,
-    gen_aniso_data: jboolean,
-) {
-    let inst = get_inst(ptr);
-
-    if let Err(e) = inst.load_sprites(mipmap_levels as u32, gen_aniso_data == 1) {
-        env.throw_new(
-            "java/lang/RuntimeException",
-            format!("could not load sprites: {e}"),
-        )
-        .unwrap();
-    }
 }

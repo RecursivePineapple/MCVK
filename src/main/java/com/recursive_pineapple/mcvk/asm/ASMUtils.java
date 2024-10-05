@@ -37,26 +37,52 @@ public class ASMUtils {
 
     public static void debug(AbstractInsnNode insn, @Nullable List<LocalVariableNode> vars) {
         if(insn instanceof MethodInsnNode method) {
-            System.out.format("MethodInsnNode{opcode=%s, owner=%s, name=%s, desc=%s, itf=%b}\n",
-                getOpcodeName(method.getOpcode()),
-                method.owner, method.name, method.desc, method.itf
-            );
+            debug(method);
         } else if(insn instanceof FieldInsnNode field) {
-            System.out.format("FieldInsnNode{opcode=%s, owner=%s, name=%s, desc=%s}\n",
-                getOpcodeName(field.getOpcode()),
-                field.owner, field.name, field.desc
-            );
+            debug(field);
         } else if(insn instanceof TypeInsnNode type) {
-            System.out.format("TypeInsnNode{opcode=%s, desc=%s}\n",
-                getOpcodeName(type.getOpcode()),
-                type.desc
-            );
+            debug(type);
         } else if(insn instanceof LdcInsnNode ldc) {
-            System.out.format("LdcInsnNode{opcode=%s, cst=%s}\n",
-                getOpcodeName(ldc.getOpcode()),
-                ldc.cst
-            );
-        } else if(insn instanceof VarInsnNode var && vars != null) {
+            debug(ldc);
+        } else if(insn instanceof VarInsnNode var) {
+            debug(var, vars);
+        } else if(insn instanceof InsnNode insnNode) {
+            debug(insnNode);
+        } else {
+            System.out.format("%s{opcode=%s, ...}\n", getInsnName(insn.getType()), getOpcodeName(insn.getOpcode()));
+        }
+    }
+
+    public static void debug(MethodInsnNode method) {
+        System.out.format("MethodInsnNode{opcode=%s, owner=%s, name=%s, desc=%s, itf=%b}\n",
+            getOpcodeName(method.getOpcode()),
+            method.owner, method.name, method.desc, method.itf
+        );
+    }
+
+    public static void debug(FieldInsnNode field) {
+        System.out.format("FieldInsnNode{opcode=%s, owner=%s, name=%s, desc=%s}\n",
+            getOpcodeName(field.getOpcode()),
+            field.owner, field.name, field.desc
+        );
+    }
+
+    public static void debug(TypeInsnNode type) {
+        System.out.format("TypeInsnNode{opcode=%s, desc=%s}\n",
+            getOpcodeName(type.getOpcode()),
+            type.desc
+        );
+    }
+
+    public static void debug(LdcInsnNode ldc) {
+        System.out.format("LdcInsnNode{opcode=%s, cst=%s}\n",
+            getOpcodeName(ldc.getOpcode()),
+            ldc.cst
+        );
+    }
+
+    public static void debug(VarInsnNode var, @Nullable List<LocalVariableNode> vars) {
+        if(vars != null) {
             LocalVariableNode vnode = getVariableNode(vars, var.var);
             Objects.requireNonNull(vnode);
             System.out.format("VarInsnNode{opcode=%s, var index=%s, name=%s, desc=%s, signature=%s}\n",
@@ -64,37 +90,40 @@ public class ASMUtils {
                 var.var,
                 vnode.name, vnode.desc, vnode.signature
             );
-        } else if(insn instanceof VarInsnNode var && vars == null) {
+        } else {
             System.out.format("VarInsnNode{opcode=%s, var index=%s}\n",
                 getOpcodeName(var.getOpcode()),
                 var.var
             );
-        } else if(insn instanceof InsnNode insnNode) {
-            System.out.format("InsnNode{opcode=%s}\n",
-                getOpcodeName(insnNode.getOpcode())
-            );
-        } else {
-            var insnName = switch(insn.getType()) {
-                case 0 -> "INSN";
-                case 1 -> "INT_INSN";
-                case 2 -> "VAR_INSN";
-                case 3 -> "TYPE_INSN";
-                case 4 -> "FIELD_INSN";
-                case 5 -> "METHOD_INSN";
-                case 6 -> "INVOKE_DYNAMIC_INSN";
-                case 7 -> "JUMP_INSN";
-                case 8 -> "LABEL";
-                case 9 -> "LDC_INSN";
-                case 10 -> "IINC_INSN";
-                case 11 -> "TABLESWITCH_INSN";
-                case 12 -> "LOOKUPSWITCH_INSN";
-                case 13 -> "MULTIANEWARRAY_INSN";
-                case 14 -> "FRAME";
-                case 15 -> "LINE";
-                default -> "AbstractInsnNode";
-            };
-            System.out.format("%s{opcode=%s, ...}\n", insnName, getOpcodeName(insn.getOpcode()));
         }
+    }
+
+    public static void debug(InsnNode insnNode) {
+        System.out.format("InsnNode{opcode=%s}\n",
+            getOpcodeName(insnNode.getOpcode())
+        );
+    }
+
+    public static String getInsnName(int type) {
+        return switch(type) {
+            case 0 -> "INSN";
+            case 1 -> "INT_INSN";
+            case 2 -> "VAR_INSN";
+            case 3 -> "TYPE_INSN";
+            case 4 -> "FIELD_INSN";
+            case 5 -> "METHOD_INSN";
+            case 6 -> "INVOKE_DYNAMIC_INSN";
+            case 7 -> "JUMP_INSN";
+            case 8 -> "LABEL";
+            case 9 -> "LDC_INSN";
+            case 10 -> "IINC_INSN";
+            case 11 -> "TABLESWITCH_INSN";
+            case 12 -> "LOOKUPSWITCH_INSN";
+            case 13 -> "MULTIANEWARRAY_INSN";
+            case 14 -> "FRAME";
+            case 15 -> "LINE";
+            default -> "AbstractInsnNode";
+        };
     }
 
     public static String getOpcodeName(int opcode) {
