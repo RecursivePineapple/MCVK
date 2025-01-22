@@ -1,30 +1,53 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    fmt::Debug,
-    sync::Arc,
-};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt::Debug;
+use std::sync::Arc;
+use std::time::Instant;
 
-use image::{Rgba, RgbaImage};
-use num::{FromPrimitive, ToPrimitive};
-use num_derive::{FromPrimitive, ToPrimitive};
+use anyhow::Context;
+use derivative::Derivative;
+use image::Rgba;
+use image::RgbaImage;
+use num::FromPrimitive;
+use num_derive::FromPrimitive;
+use num_derive::ToPrimitive;
 use smallvec::SmallVec;
-use vulkano::{
-    buffer::{BufferUsage, Subbuffer},
-    command_buffer::{
-        AutoCommandBufferBuilder, BlitImageInfo, CopyBufferToImageInfo, PrimaryAutoCommandBuffer,
-    },
-    device::DeviceOwned,
-    image::{Image, ImageFormatInfo, ImageLayout, ImageUsage, SampleCount},
-    memory::allocator::{MemoryTypeFilter, StandardMemoryAllocator},
-};
+use tracing::info;
+use tracing::warn;
+use vulkano::buffer::BufferUsage;
+use vulkano::buffer::Subbuffer;
+use vulkano::command_buffer::AutoCommandBufferBuilder;
+use vulkano::command_buffer::BlitImageInfo;
+use vulkano::command_buffer::CommandBufferUsage;
+use vulkano::command_buffer::CopyBufferToImageInfo;
+use vulkano::command_buffer::PrimaryAutoCommandBuffer;
+use vulkano::command_buffer::PrimaryCommandBufferAbstract;
+use vulkano::device::DeviceOwned;
+use vulkano::image::sampler::Sampler;
+use vulkano::image::view::ImageView;
+use vulkano::image::view::ImageViewCreateInfo;
+use vulkano::image::view::ImageViewType;
+use vulkano::image::Image;
+use vulkano::image::ImageAspects;
+use vulkano::image::ImageFormatInfo;
+use vulkano::image::ImageLayout;
+use vulkano::image::ImageSubresourceRange;
+use vulkano::image::ImageUsage;
+use vulkano::image::SampleCount;
+use vulkano::memory::allocator::MemoryTypeFilter;
+use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::sync::GpuFuture;
 
-use crate::vulkan::{
-    instance::Allocators,
-    spinlock::SpinLock,
-    utils::{Ref, TypedVec},
-};
+use crate::vulkan::instance::Allocators;
+use crate::vulkan::render_manager::RenderManager;
+use crate::vulkan::spinlock::SpinLock;
+use crate::vulkan::utils::Ref;
 
-use super::textures::{AnimationMetadata, TextureImage, TextureLoadError};
+use super::lookup::TextureLookup;
+use super::textures::AnimationMetadata;
+use super::textures::TextureImage;
+use super::textures::TextureLoadError;
 
 pub type ArrayIndex = u16;
 pub type ArraySlotIndex = u16;
@@ -38,6 +61,7 @@ pub struct TextureStorage {
 
 pub struct TextureArray {
     id: ArrayIndex,
+    layer_count: u16,
     size: [u32; 2],
     image: Arc<Image>,
     updates: HashMap<ArraySlotIndex, TextureUpdate>,
@@ -46,21 +70,16 @@ pub struct TextureArray {
     mip_levels: u32,
 }
 
-#[derive(Debug, Clone)]
-pub struct TextureSlotHandle {
-    pub array: ArrayIndex,
-    pub slot: ArraySlotIndex,
-}
-
 struct TextureUpdate {
     image_data: Subbuffer<[u32]>,
     handle: Option<Arc<TextureHandle>>,
+    animation: Option<AnimationMetadata>,
 }
 
 impl TextureStorage {
     pub fn new(allocators: &Ref<Allocators>) -> Self {
         let mut this = Self {
-            allocator: allocators.borrow().memory_allocator.clone(),
+            allocator: allocators.read().memory_allocator.clone(),
             next_array: 0,
             arrays: HashMap::new(),
             missingno: Arc::new(TextureReference::None),
@@ -222,13 +241,14 @@ impl TextureStorage {
                 ..Default::default()
             },
         )
-        .unwrap(); // TODO: don't unwrap
+        .unwrap();
 
         let id = self.next_array;
         self.next_array += 1;
 
         let array = TextureArray {
             id,
+            layer_count: layers,
             size: [width, height],
             image: texture,
             updates: HashMap::new(),
@@ -240,6 +260,29 @@ impl TextureStorage {
         self.arrays.insert(id, array);
 
         self.arrays.get_mut(&id).unwrap()
+    }
+}
+
+impl TextureStorage {
+    pub fn get_view(&self, array: ArrayIndex) -> Arc<ImageView> {
+        let array = self.arrays.get(&array).unwrap();
+        let image = array.image.clone();
+
+        ImageView::new(
+            image.clone(),
+            ImageViewCreateInfo {
+                view_type: ImageViewType::Dim2dArray,
+                format: image.format(),
+                subresource_range: ImageSubresourceRange {
+                    aspects: ImageAspects::COLOR,
+                    array_layers: 0..(array.layer_count as u32),
+                    mip_levels: 0..array.mip_levels,
+                },
+                usage: ImageUsage::SAMPLED,
+                ..Default::default()
+            },
+        )
+        .unwrap()
     }
 }
 
@@ -364,7 +407,7 @@ impl TextureStorage {
             }
         }
 
-        tracing::info!(what = "updating gpu textures", update_count, invalid_count);
+        info!(what = "updating gpu textures", update_count, invalid_count);
     }
 }
 
@@ -394,11 +437,16 @@ impl Drop for TextureStorageHandle {
 pub enum TextureReference {
     None,
     Managed(TextureStorageHandle),
-    Inexhaustive(Inexhaustive),
 }
 
-#[derive(Debug)]
-struct Inexhaustive();
+impl TextureReference {
+    pub fn unwrap_indices(&self) -> &'_ TextureStorageIndices {
+        match self {
+            Self::None => panic!(),
+            Self::Managed(storage) => &storage.indices,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, FromPrimitive, ToPrimitive)]
 #[repr(u32)]
@@ -450,11 +498,15 @@ impl Default for TextureParams {
     }
 }
 
+/// Represents a gl texture id.
+/// Returned from glGenTextures and used in glBindTexture.
+pub type GlTextureId = i32;
+
 #[derive(Debug)]
 /// A reference to a minecraft texture. Represents the resource, not the backing texture.
 pub struct TextureHandle {
     pub resource_name: Option<String>,
-    pub texture_id: u32,
+    pub texture_id: GlTextureId,
     pub texture: SpinLock<Arc<TextureReference>>,
     pub animation: Option<AnimationMetadata>,
     pub mipmapped: bool,
@@ -618,7 +670,7 @@ impl TextureStorage {
             },
             image_data.len() as u64,
         )
-        .unwrap(); // TODO: don't unwrap
+        .unwrap();
 
         {
             let mut guard = source_buffer.write().unwrap();
@@ -635,6 +687,7 @@ impl TextureStorage {
                         .clone()
                         .slice((i * frame_pixel_size) as u64..((i + 1) * frame_pixel_size) as u64),
                     handle: owning_handle.clone(),
+                    animation: image.get_animation().cloned(),
                 },
             );
         }
@@ -663,13 +716,9 @@ impl TextureStorage {
                     Some(tex)
                 }
             }
-            _ => {
-                return Err(TextureError::BadHandle);
-            }
         };
 
-        #[allow(unused_assignments)]
-        let mut temp = None;
+        let temp;
 
         let texture = match texture {
             Some(tex) => tex,
@@ -707,5 +756,184 @@ impl TextureStorage {
         let texture = tex_handle.texture.get();
 
         self.enqueue_reference_update(&texture, image, Some(tex_handle.clone()))
+    }
+}
+
+#[derive(Derivative)]
+#[derivative(Debug)]
+pub struct TextureManager {
+    #[derivative(Debug = "ignore")]
+    allocators: Ref<Allocators>,
+    #[derivative(Debug = "ignore")]
+    rendering: Ref<RenderManager>,
+
+    #[derivative(Debug = "ignore")]
+    pub texture_storage: TextureStorage,
+
+    pub is_resource_pack_reload: bool,
+    pub unupdated_textures: HashSet<String>,
+
+    pub textures_by_id: Ref<HashMap<GlTextureId, Arc<TextureHandle>>>,
+    pub textures_by_name: Ref<HashMap<String, Arc<TextureHandle>>>,
+    pub next_texture_id: GlTextureId,
+
+    pub lookup: Option<Ref<TextureLookup>>,
+}
+
+impl TextureManager {
+    pub fn new(allocators: &Ref<Allocators>, rendering: &Ref<RenderManager>) -> Self {
+        Self {
+            allocators: allocators.clone(),
+            rendering: rendering.clone(),
+
+            texture_storage: TextureStorage::new(allocators),
+
+            is_resource_pack_reload: false,
+            unupdated_textures: HashSet::new(),
+
+            textures_by_id: Ref::new(HashMap::new()),
+            textures_by_name: Ref::new(HashMap::new()),
+            next_texture_id: 0,
+
+            lookup: None,
+        }
+    }
+
+    pub fn begin_texture_reload(&mut self) {
+        self.is_resource_pack_reload = true;
+        self.unupdated_textures = self.textures_by_name.read().keys().cloned().collect();
+    }
+
+    pub fn create_texture(&mut self, resource_name: Option<String>) -> Arc<TextureHandle> {
+        let id = self.next_texture_id;
+        self.next_texture_id += 1;
+
+        let handle = Arc::new(TextureHandle {
+            resource_name: resource_name.clone(),
+            texture_id: id,
+            texture: SpinLock::new(Arc::new(TextureReference::None)),
+            animation: None,
+            mipmapped: false,
+            params: SpinLock::new(TextureParams::default()),
+        });
+
+        self.textures_by_id.write().insert(id, handle.clone());
+
+        if let Some(name) = resource_name {
+            self.textures_by_name
+                .write()
+                .insert(name.clone(), handle.clone());
+        }
+
+        handle
+    }
+
+    pub fn free_texture(&mut self, id: GlTextureId) {
+        if let Some(t) = self.textures_by_id.write().remove(&id) {
+            if let Some(name) = t.resource_name.as_ref() {
+                self.textures_by_name.write().remove(name);
+            }
+        }
+    }
+
+    pub fn get_texture_handle(&self, id: GlTextureId) -> Option<Arc<TextureHandle>> {
+        self.textures_by_id.read().get(&id).cloned()
+    }
+
+    pub fn enqueue_sprite(
+        &mut self,
+        name: String,
+        uv: [f32; 2],
+        image: TextureImage,
+    ) -> Result<Arc<TextureHandle>, anyhow::Error> {
+        self.unupdated_textures.remove(&name);
+
+        let handle = self.textures_by_name.read().get(&name).cloned();
+        let handle = match handle {
+            Some(handle) => handle,
+            None => self.create_texture(Some(name.clone())),
+        };
+
+        let image = image
+            .load()
+            .with_context(|| format!("could not load image data for texture {name}"))?;
+
+        if matches!(image, TextureImage::None) {
+            handle
+                .texture
+                .set(self.texture_storage.get_missingno().clone());
+
+            return Ok(handle);
+        }
+
+        self.texture_storage
+            .enqueue_handle_update(&handle, image)
+            .with_context(|| format!("could not update gpu texture for texture {name}"))?;
+
+        Ok(handle)
+    }
+
+    pub fn finish_texture_reload(&mut self) -> anyhow::Result<()> {
+        for skipped in self.unupdated_textures.drain() {
+            warn!(
+                what = "texture has been skipped in resource reload",
+                who = skipped
+            );
+
+            let handle = self.textures_by_name.write().remove(&skipped).unwrap();
+            self.textures_by_id.write().remove(&handle.texture_id);
+
+            // free the backing texture
+            handle
+                .texture
+                .set(self.texture_storage.get_missingno().clone());
+        }
+
+        info!(what = "waiting for all frames to finish for texture reload");
+
+        let mut renderer = self.rendering.write();
+
+        let mut commands = AutoCommandBufferBuilder::primary(
+            &self.allocators.read().command_buffer_allocator,
+            renderer.queue().queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        let pre_record = Instant::now();
+
+        self.texture_storage.record_commands(&mut commands);
+
+        let commands = commands.build()?;
+
+        let post_record = Instant::now();
+
+        renderer.flush()?;
+
+        let fut = commands
+            .execute(renderer.queue().clone())?
+            .boxed()
+            .then_signal_fence_and_flush()?;
+
+        fut.wait(None).unwrap();
+
+        let post_upload = Instant::now();
+
+        info!(
+            what = "uploaded all gpu textures",
+            count = self.textures_by_name.read().len(),
+            record_duration_secs = (post_record - pre_record).as_secs_f32(),
+            upload_duration_secs = (post_upload - post_record).as_secs_f32()
+        );
+
+        Ok(())
+    }
+
+    fn create_lookup(&mut self) {
+        todo!()
+    }
+
+    pub fn get_lookup(&self) -> Ref<TextureLookup> {
+        todo!()
     }
 }

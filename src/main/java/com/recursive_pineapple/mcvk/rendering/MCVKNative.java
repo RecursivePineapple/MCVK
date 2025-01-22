@@ -109,11 +109,11 @@ public class MCVKNative {
 
     public static native void finishFrame();
 
-    public static native void enqueueMissingSprite(String name);
+    public static native void enqueueMissingSprite(String name, int u, int v);
 
-    public static native void enqueueFrameSprite(String name, int width, int height, int[][][] frames, String animationJson);
+    public static native void enqueueFrameSprite(String name, int width, int height, int[][][] frames, int u, int v, String animationJson);
 
-    public static native void enqueueRawSprite(String name, ByteBuffer image, String animationJson);
+    public static native void enqueueRawSprite(String name, ByteBuffer image, int u, int v, String animationJson);
 
     public static native void beginTextureReload();
 

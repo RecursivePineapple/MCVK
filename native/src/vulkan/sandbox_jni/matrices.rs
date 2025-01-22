@@ -1,5 +1,3 @@
-use nalgebra_glm::DVec3;
-
 use super::jni_prelude::*;
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.RenderSandbox")]
@@ -56,8 +54,8 @@ unsafe fn glTranslatef(_: JNIEnv<'_>, _: JClass<'_>, x: jfloat, y: jfloat, z: jf
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.RenderSandbox")]
 unsafe fn glTranslated(_: JNIEnv<'_>, _: JClass<'_>, x: jdouble, y: jdouble, z: jdouble) {
-    push_instruction(RenderInstruction::Translated {
-        delta: DVec3::new(x, y, z),
+    push_instruction(RenderInstruction::Translate {
+        delta: Vec3::new(x as f32, y as f32, z as f32),
     });
 }
 
@@ -70,8 +68,8 @@ unsafe fn glScalef(_: JNIEnv<'_>, _: JClass<'_>, x: jfloat, y: jfloat, z: jfloat
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.RenderSandbox")]
 unsafe fn glScaled(_: JNIEnv<'_>, _: JClass<'_>, x: jdouble, y: jdouble, z: jdouble) {
-    push_instruction(RenderInstruction::Scaled {
-        scale: DVec3::new(x, y, z),
+    push_instruction(RenderInstruction::Scale {
+        scale: Vec3::new(x as f32, y as f32, z as f32),
     });
 }
 
@@ -92,8 +90,8 @@ unsafe fn glRotated(
     y: jdouble,
     z: jdouble,
 ) {
-    push_instruction(RenderInstruction::Rotated {
-        angle,
-        axis: DVec3::new(x, y, z),
+    push_instruction(RenderInstruction::Rotate {
+        angle: angle as f32,
+        axis: Vec3::new(x as f32, y as f32, z as f32),
     });
 }

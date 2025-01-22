@@ -103,13 +103,13 @@ impl SwapchainManager {
         if self.surface.is_none() {
             self.surface = Some(
                 self.window
-                    .borrow()
-                    .create_surface(&self.devices.borrow().instance),
+                    .read()
+                    .create_surface(&self.devices.read().instance),
             );
 
             self.image_format = Some(
                 self.devices
-                    .borrow()
+                    .read()
                     .device
                     .physical_device()
                     .surface_formats(self.surface.as_ref().unwrap(), Default::default())
@@ -122,7 +122,7 @@ impl SwapchainManager {
 
         if let Some(current) = self.swapchain.clone() {
             let (new_swapchain, new_images) = match current.recreate(SwapchainCreateInfo {
-                image_extent: self.window.borrow().get_window_size(),
+                image_extent: self.window.read().get_window_size(),
                 image_format: self.image_format.clone().unwrap(),
                 present_mode: match self.window_settings.vsync {
                     VsyncMode::Off => PresentMode::Immediate,
@@ -141,7 +141,7 @@ impl SwapchainManager {
         } else {
             let caps = self
                 .devices
-                .borrow()
+                .read()
                 .device
                 .physical_device()
                 .surface_capabilities(self.surface.as_ref().unwrap(), Default::default())
@@ -151,12 +151,12 @@ impl SwapchainManager {
             let alpha = caps.supported_composite_alpha.into_iter().next().unwrap();
 
             let (swapchain, images) = Swapchain::new(
-                self.devices.borrow().device.clone(),
+                self.devices.read().device.clone(),
                 self.surface.clone().unwrap(),
                 SwapchainCreateInfo {
                     min_image_count: SWAPCHAIN_IMAGE_COUNT,
                     image_format: self.image_format.clone().unwrap(),
-                    image_extent: self.window.borrow().get_window_size(),
+                    image_extent: self.window.read().get_window_size(),
                     image_usage: usage,
                     composite_alpha: alpha,
                     present_mode: match self.window_settings.vsync {
@@ -170,7 +170,7 @@ impl SwapchainManager {
                     ),
                     full_screen_exclusive: if self
                         .devices
-                        .borrow()
+                        .read()
                         .device
                         .enabled_extensions()
                         .ext_full_screen_exclusive
@@ -209,7 +209,7 @@ impl SwapchainManager {
             let extent = self.images.as_ref().unwrap()[0].extent();
 
             let depth_buffer = Image::new(
-                self.allocator.borrow().memory_allocator.clone(),
+                self.allocator.read().memory_allocator.clone(),
                 ImageCreateInfo {
                     extent,
                     array_layers: self.images.as_ref().unwrap().len() as u32,
@@ -223,7 +223,7 @@ impl SwapchainManager {
             .unwrap();
 
             let normal_buffer = Image::new(
-                self.allocator.borrow().memory_allocator.clone(),
+                self.allocator.read().memory_allocator.clone(),
                 ImageCreateInfo {
                     extent,
                     array_layers: self.images.as_ref().unwrap().len() as u32,

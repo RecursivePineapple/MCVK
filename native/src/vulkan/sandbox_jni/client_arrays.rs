@@ -17,17 +17,17 @@ impl PointerArrayType {
     }
 }
 
-impl PointerDataType {
-    pub fn size(&self) -> usize {
+impl GLDataType {
+    pub fn size(&self) -> u8 {
         match self {
-            PointerDataType::U8 => 1,
-            PointerDataType::I8 => 1,
-            PointerDataType::U16 => 2,
-            PointerDataType::I16 => 2,
-            PointerDataType::U32 => 4,
-            PointerDataType::I32 => 4,
-            PointerDataType::F32 => 4,
-            PointerDataType::F64 => 8,
+            GLDataType::U8 => 1,
+            GLDataType::I8 => 1,
+            GLDataType::U16 => 2,
+            GLDataType::I16 => 2,
+            GLDataType::U32 => 4,
+            GLDataType::I32 => 4,
+            GLDataType::F32 => 4,
+            GLDataType::F64 => 8,
         }
     }
 }
@@ -87,10 +87,10 @@ pub unsafe fn addPointerArray(
 
     let data = std::slice::from_raw_parts(start, byte_length);
 
-    let item_type = PointerDataType::from_i32(item_type).unwrap();
+    let item_type = GLDataType::from_i32(item_type).unwrap();
     let item_size = item_type.size();
 
-    let vec_byte_size = size * item_size;
+    let vec_byte_size = size * (item_size as usize);
     let stride = if stride > 0 { stride } else { vec_byte_size };
 
     let vec_count = byte_length / stride;

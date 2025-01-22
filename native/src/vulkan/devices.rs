@@ -1,31 +1,6 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::collections::LinkedList;
-use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
-
-use anyhow::Context;
 use anyhow::Result;
-use bytemuck::Pod;
-use bytemuck::Zeroable;
-use enum_primitive::*;
-use nalgebra::Matrix4;
-use nalgebra_glm::half_pi;
-use nalgebra_glm::perspective;
-use nalgebra_glm::TMat4;
-use tracing::debug;
+use std::sync::Arc;
 use tracing::info;
-use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::command_buffer::AutoCommandBufferBuilder;
-use vulkano::command_buffer::CommandBufferUsage;
-use vulkano::command_buffer::PrimaryAutoCommandBuffer;
-use vulkano::command_buffer::PrimaryCommandBufferAbstract;
-use vulkano::command_buffer::RenderPassBeginInfo;
-use vulkano::command_buffer::SubpassBeginInfo;
-use vulkano::command_buffer::SubpassContents;
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::Device;
 use vulkano::device::DeviceCreateInfo;
@@ -33,54 +8,15 @@ use vulkano::device::DeviceExtensions;
 use vulkano::device::Queue;
 use vulkano::device::QueueCreateInfo;
 use vulkano::device::QueueFlags;
-use vulkano::format::Format;
-use vulkano::image::view::ImageView;
-use vulkano::image::view::ImageViewCreateInfo;
-use vulkano::image::view::ImageViewType;
-use vulkano::image::Image;
-use vulkano::image::ImageCreateInfo;
-use vulkano::image::ImageLayout;
-use vulkano::image::ImageUsage;
 use vulkano::instance::Instance;
 use vulkano::instance::InstanceCreateFlags;
 use vulkano::instance::InstanceCreateInfo;
 use vulkano::instance::InstanceExtensions;
-use vulkano::memory::allocator::FreeListAllocator;
-use vulkano::memory::allocator::GenericMemoryAllocator;
-use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::render_pass::Framebuffer;
-use vulkano::render_pass::FramebufferCreateInfo;
-use vulkano::render_pass::RenderPass;
-use vulkano::swapchain::acquire_next_image;
-use vulkano::swapchain::FullScreenExclusive;
-use vulkano::swapchain::PresentGravity;
-use vulkano::swapchain::PresentMode;
-use vulkano::swapchain::PresentScaling;
-use vulkano::swapchain::Surface;
-use vulkano::swapchain::Swapchain;
-use vulkano::swapchain::SwapchainAcquireFuture;
-use vulkano::swapchain::SwapchainCreateInfo;
-use vulkano::sync::future::FenceSignalFuture;
-use vulkano::sync::GpuFuture;
-use vulkano::LoadingError;
-use vulkano::Validated;
 use vulkano::Version;
-use vulkano::VulkanError;
 use vulkano::VulkanLibrary;
-
-use crate::vulkan::textures::textures::TextureImage;
 
 use super::glfw_window::GLFWWindow;
 use super::instance::VulkanInitError;
-use super::render_manager::RenderManager;
-use super::shaders::uniforms::Uniform;
-use super::spinlock::SpinLock;
-use super::swapchain::SwapchainManager;
-use super::textures::texture_manager::TextureHandle;
-use super::textures::texture_manager::TextureParams;
-use super::textures::texture_manager::TextureReference;
-use super::textures::texture_manager::TextureStorage;
 use super::utils::Ref;
 
 pub struct Devices {
@@ -95,7 +31,7 @@ impl Devices {
 
         let mut inst_extensions = Vec::new();
 
-        inst_extensions.append(&mut window.borrow().get_required_instance_extensions());
+        inst_extensions.append(&mut window.read().get_required_instance_extensions());
 
         let mut inst_extensions =
             InstanceExtensions::from_iter(inst_extensions.iter().map(|s| s.as_str()));
@@ -149,7 +85,7 @@ impl Devices {
                     .position(|(i, q)| {
                         q.queue_flags.contains(QueueFlags::GRAPHICS)
                             && window
-                                .borrow()
+                                .read()
                                 .get_physical_device_presentation_support(&*instance, &*p, i as u32)
                     })
                     .map(|i| (p, i as u32))

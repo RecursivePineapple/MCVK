@@ -1,41 +1,29 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
 
-use anyhow::Context;
 use anyhow::Result;
 use enum_primitive::*;
-use tracing::info;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::command_buffer::AutoCommandBufferBuilder;
-use vulkano::command_buffer::CommandBufferUsage;
-use vulkano::command_buffer::PrimaryCommandBufferAbstract;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::format::Format;
 use vulkano::image::ImageLayout;
 use vulkano::memory::allocator::FreeListAllocator;
 use vulkano::memory::allocator::GenericMemoryAllocator;
 use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::sync::GpuFuture;
 use vulkano::LoadingError;
 use vulkano::Validated;
 use vulkano::VulkanError;
 
-use crate::vulkan::textures::textures::TextureImage;
-
 use super::devices::Devices;
 use super::glfw_window::GLFWWindow;
 use super::render_manager::RenderManager;
-use super::spinlock::SpinLock;
 use super::swapchain::SwapchainManager;
 use super::swapchain::VsyncMode;
-use super::textures::texture_manager::TextureHandle;
-use super::textures::texture_manager::TextureParams;
-use super::textures::texture_manager::TextureReference;
-use super::textures::texture_manager::TextureStorage;
+use super::textures::texture_manager::TextureManager;
 use super::utils::Ref;
+
+pub static MAIN_THREAD: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum VulkanInitError {
@@ -49,180 +37,7 @@ pub enum VulkanInitError {
     NoGPU,
 }
 
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
-
-pub struct TextureManager {
-    allocators: Ref<Allocators>,
-    rendering: Ref<RenderManager>,
-
-    pub texture_storage: TextureStorage,
-
-    pub is_resource_pack_reload: bool,
-    pub unupdated_textures: HashSet<String>,
-
-    pub textures_by_id: HashMap<u32, Arc<TextureHandle>>,
-    pub textures_by_name: HashMap<String, Arc<TextureHandle>>,
-    pub next_texture_id: u32,
-}
-
-impl TextureManager {
-    pub fn new(allocators: &Ref<Allocators>, rendering: &Ref<RenderManager>) -> Self {
-        Self {
-            allocators: allocators.clone(),
-            rendering: rendering.clone(),
-
-            texture_storage: TextureStorage::new(allocators),
-
-            is_resource_pack_reload: false,
-            unupdated_textures: HashSet::new(),
-
-            textures_by_id: HashMap::new(),
-            textures_by_name: HashMap::new(),
-            next_texture_id: 0,
-        }
-    }
-
-    pub fn begin_texture_reload(&mut self) {
-        self.is_resource_pack_reload = true;
-        self.unupdated_textures = self.textures_by_name.keys().cloned().collect();
-    }
-
-    pub fn create_texture(&mut self) -> u32 {
-        let id = self.next_texture_id;
-        self.textures_by_id.insert(
-            id,
-            Arc::new(TextureHandle {
-                resource_name: None,
-                texture_id: id,
-                texture: SpinLock::new(Arc::new(TextureReference::None)),
-                animation: None,
-                mipmapped: false,
-                params: SpinLock::new(TextureParams::default()),
-            }),
-        );
-
-        self.next_texture_id += 1;
-
-        id
-    }
-
-    pub fn free_texture(&mut self, id: u32) {
-        if let Some(t) = self.textures_by_id.remove(&id) {
-            if let Some(name) = t.resource_name.as_ref() {
-                self.textures_by_name.remove(name);
-            }
-        }
-    }
-
-    pub fn get_texture_handle(&self, id: u32) -> Option<&Arc<TextureHandle>> {
-        self.textures_by_id.get(&id)
-    }
-
-    pub fn enqueue_sprite(
-        &mut self,
-        name: String,
-        image: TextureImage,
-    ) -> Result<Arc<TextureHandle>, anyhow::Error> {
-        self.unupdated_textures.remove(&name);
-
-        let handle = match self.textures_by_name.get(&name) {
-            Some(handle) => handle.clone(),
-            None => {
-                let handle = Arc::new(TextureHandle {
-                    resource_name: Some(name.clone()),
-                    texture_id: self.next_texture_id,
-                    texture: SpinLock::new(Arc::new(TextureReference::None)),
-                    animation: None,
-                    mipmapped: true,
-                    params: SpinLock::new(TextureParams::default()),
-                });
-
-                self.next_texture_id += 1;
-
-                self.textures_by_name.insert(name.clone(), handle.clone());
-                self.textures_by_id
-                    .insert(handle.texture_id, handle.clone());
-
-                handle
-            }
-        };
-
-        let image = image
-            .load()
-            .with_context(|| format!("could not load image data for texture {name}"))?;
-
-        if matches!(image, TextureImage::None) {
-            handle
-                .texture
-                .set(self.texture_storage.get_missingno().clone());
-
-            return Ok(handle);
-        }
-
-        self.texture_storage
-            .enqueue_handle_update(&handle, image)
-            .with_context(|| format!("could not update gpu texture for texture {name}"))?;
-
-        Ok(handle)
-    }
-
-    pub fn finish_texture_reload(&mut self) -> anyhow::Result<()> {
-        for skipped in self.unupdated_textures.drain() {
-            tracing::warn!(
-                what = "texture has been skipped in resource reload",
-                who = skipped
-            );
-
-            let handle = self.textures_by_name.remove(&skipped).unwrap();
-            self.textures_by_id.remove(&handle.texture_id);
-
-            // free the backing texture
-            handle
-                .texture
-                .set(self.texture_storage.get_missingno().clone());
-        }
-
-        info!(what = "waiting for all frames to finish for texture reload");
-
-        let mut renderer = self.rendering.borrow_mut();
-
-        renderer.flush()?;
-
-        let mut commands = AutoCommandBufferBuilder::primary(
-            &self.allocators.borrow().command_buffer_allocator,
-            renderer.queue().queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
-        let pre_record = Instant::now();
-
-        self.texture_storage.record_commands(&mut commands);
-
-        let commands = commands.build()?;
-
-        let post_record = Instant::now();
-
-        let fut = commands
-            .execute(renderer.queue().clone())?
-            .boxed()
-            .then_signal_fence_and_flush()?;
-
-        fut.wait(None).unwrap();
-
-        let post_upload = Instant::now();
-
-        info!(
-            what = "uploaded all gpu textures",
-            count = self.textures_by_name.len(),
-            record_duration_secs = (post_record - pre_record).as_secs_f32(),
-            upload_duration_secs = (post_upload - post_record).as_secs_f32()
-        );
-
-        Ok(())
-    }
-}
-
+#[derive(Debug)]
 pub struct Allocators {
     pub memory_allocator: Arc<GenericMemoryAllocator<FreeListAllocator>>,
     pub descriptor_set_allocator: StandardDescriptorSetAllocator,
@@ -233,14 +48,14 @@ impl Allocators {
     pub fn new(devices: &Ref<Devices>) -> Self {
         Self {
             memory_allocator: Arc::new(StandardMemoryAllocator::new_default(
-                devices.borrow().device.clone(),
+                devices.read().device.clone(),
             )),
             descriptor_set_allocator: StandardDescriptorSetAllocator::new(
-                devices.borrow().device.clone(),
+                devices.read().device.clone(),
                 Default::default(),
             ),
             command_buffer_allocator: StandardCommandBufferAllocator::new(
-                devices.borrow().device.clone(),
+                devices.read().device.clone(),
                 Default::default(),
             ),
         }
@@ -261,36 +76,37 @@ unsafe impl Sync for MCVK {}
 
 impl MCVK {
     pub fn new(window: Ref<GLFWWindow>) -> Result<Self, VulkanInitError> {
-        let devices = Arc::new(RefCell::new(Devices::new(&window)?));
+        MAIN_THREAD.store(
+            std::thread::current().id().as_u64().into(),
+            Ordering::Release,
+        );
+
+        let devices = Ref::new(Devices::new(&window)?);
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(
-            devices.borrow().device.clone(),
+            devices.read().device.clone(),
         ));
-        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
-            devices.borrow().device.clone(),
-            Default::default(),
-        );
-        let command_buffer_allocator = StandardCommandBufferAllocator::new(
-            devices.borrow().device.clone(),
-            Default::default(),
-        );
+        let descriptor_set_allocator =
+            StandardDescriptorSetAllocator::new(devices.read().device.clone(), Default::default());
+        let command_buffer_allocator =
+            StandardCommandBufferAllocator::new(devices.read().device.clone(), Default::default());
 
-        let allocators = Arc::new(RefCell::new(Allocators {
+        let allocators = Ref::new(Allocators {
             memory_allocator,
             descriptor_set_allocator,
             command_buffer_allocator,
-        }));
+        });
 
-        let swapchain = Arc::new(RefCell::new(SwapchainManager::new(
+        let swapchain = Ref::new(SwapchainManager::new(
             window.clone(),
             devices.clone(),
             allocators.clone(),
-        )));
+        ));
 
-        let render_pass = vulkano::ordered_passes_renderpass!(devices.borrow().device.clone(),
+        let render_pass = vulkano::ordered_passes_renderpass!(devices.read().device.clone(),
             attachments: {
                 color: {
-                    format: swapchain.borrow().image_format.clone().unwrap(),
+                    format: swapchain.read().image_format.clone().unwrap(),
                     samples: 1,
                     load_op: Load,
                     store_op: Store,
@@ -316,25 +132,6 @@ impl MCVK {
             },
             passes: [
                 {
-                    // sky
-                    color: [color],
-                    depth_stencil: {depth},
-                    input: []
-                },
-                {
-                    // world (solid)
-                    color: [color],
-                    depth_stencil: {depth},
-                    input: []
-                },
-                {
-                    // world (transparent)
-                    color: [color],
-                    depth_stencil: {depth},
-                    input: []
-                },
-                {
-                    // ui
                     color: [color],
                     depth_stencil: {depth},
                     input: []
@@ -343,16 +140,12 @@ impl MCVK {
         )
         .unwrap();
 
-        swapchain.borrow_mut().render_pass = Some(render_pass.clone());
-        swapchain.borrow_mut().create_framebuffers();
+        swapchain.write().render_pass = Some(render_pass.clone());
+        swapchain.write().create_framebuffers();
 
-        let rendering = Arc::new(RefCell::new(RenderManager::new(
-            &allocators,
-            &devices,
-            &swapchain,
-        )));
+        let rendering = Ref::new(RenderManager::new(&allocators, &devices, &swapchain));
 
-        let textures = Arc::new(RefCell::new(TextureManager::new(&allocators, &rendering)));
+        let textures = Ref::new(TextureManager::new(&allocators, &rendering));
 
         Ok(Self {
             window,
@@ -367,12 +160,12 @@ impl MCVK {
 
 impl MCVK {
     pub fn set_max_fps(&mut self, max_fps: Option<u32>) {
-        self.swapchain.borrow_mut().window_settings.max_fps = max_fps;
+        self.swapchain.write().window_settings.max_fps = max_fps;
     }
 
     pub fn set_vsync(&mut self, vsync: VsyncMode) {
-        self.swapchain.borrow_mut().window_settings.vsync = vsync;
-        self.swapchain.borrow_mut().recreate_swapchain = true;
+        self.swapchain.write().window_settings.vsync = vsync;
+        self.swapchain.write().recreate_swapchain = true;
     }
 }
 

@@ -1,29 +1,38 @@
 use std::array::from_fn;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use fastset::Set;
-use nalgebra::{Orthographic3, UnitQuaternion};
-use nalgebra_glm::{DVec3, TMat4, Vec3, Vec4};
+use nalgebra::Orthographic3;
+use nalgebra::UnitQuaternion;
+use nalgebra_glm::TMat4;
+use nalgebra_glm::Vec3;
+use nalgebra_glm::Vec4;
 
-use vulkano::format::Format;
-use vulkano::pipeline::graphics::vertex_input::{
-    VertexBufferDescription, VertexInputRate, VertexMemberInfo,
-};
+use num::ToPrimitive;
 
 use super::commands::CommandQueue;
-use super::dynamic_shader::{
-    ColorMode, DynamicPipelinePushConstants, DynamicPipelineSpec, ShaderMatrixMode, VertexInputSpec,
-};
+use super::commands::RenderCommand;
+use super::dynamic_shader::ColorMode;
+use super::dynamic_shader::DataSource;
+use super::dynamic_shader::DynamicPipelinePushConstants;
+use super::dynamic_shader::DynamicPipelineRasterization;
+use super::dynamic_shader::DynamicPipelineSpec;
+use super::dynamic_shader::ShaderMatrixMode;
+use super::dynamic_shader::VertexBufferLayout;
+use super::dynamic_shader::VertexInputSpec;
+use super::dynamic_shader::VertexInputType;
+use super::sandbox::GLDataType;
+use super::sandbox::MatrixMode;
+use super::sandbox::OrthoData;
+use super::sandbox::PointerArrayType;
+use super::sandbox::RenderInstruction;
 use super::sandbox_jni::jni_prelude::DrawMode;
-use super::{
-    commands::RenderCommand,
-    sandbox::{MatrixMode, OrthoData, PointerArrayType, PointerDataType, RenderInstruction},
-};
+use super::textures::lookup::TextureLookup;
 
 #[derive(Debug)]
 struct MatrixStack {
     pub top: usize,
-    pub matrices: Vec<TMat4<f64>>,
+    pub matrices: Vec<TMat4<f32>>,
 }
 
 impl MatrixStack {
@@ -49,7 +58,7 @@ impl MatrixStack {
         }
     }
 
-    pub fn get(&self) -> &TMat4<f64> {
+    pub fn get(&self) -> &TMat4<f32> {
         &self.matrices[self.top]
     }
 
@@ -58,31 +67,17 @@ impl MatrixStack {
     }
 
     pub fn translate(&mut self, v: &Vec3) {
-        self.matrices[self.top].append_translation_mut(&v.cast::<f64>());
-    }
-
-    pub fn translated(&mut self, v: &DVec3) {
-        self.matrices[self.top].append_translation_mut(&v);
+        self.matrices[self.top].append_translation_mut(&v.cast::<f32>());
     }
 
     pub fn scale(&mut self, v: &Vec3) {
-        self.matrices[self.top].append_nonuniform_scaling_mut(&v.cast::<f64>());
-    }
-
-    pub fn scaled(&mut self, v: &DVec3) {
-        self.matrices[self.top].append_nonuniform_scaling_mut(&v);
+        self.matrices[self.top].append_nonuniform_scaling_mut(&v.cast::<f32>());
     }
 
     pub fn rotate(&mut self, axis: &Vec3, angle: f32) {
         let q = UnitQuaternion::new(axis.normalize() * angle);
         let qm: TMat4<f32> = q.to_rotation_matrix().into();
-        self.matrices[self.top] = qm.cast::<f64>() * self.matrices[self.top];
-    }
-
-    pub fn rotated(&mut self, axis: &DVec3, angle: f64) {
-        let q = UnitQuaternion::new(axis.normalize() * angle);
-        let qm: TMat4<f64> = q.to_rotation_matrix().into();
-        self.matrices[self.top] = qm * self.matrices[self.top];
+        self.matrices[self.top] = qm.cast::<f32>() * self.matrices[self.top];
     }
 
     pub fn ortho(&mut self, params: &OrthoData) {
@@ -94,16 +89,16 @@ impl MatrixStack {
             params.z_near,
             params.z_far,
         );
-        self.matrices[self.top] = m.as_matrix().cast::<f64>() * self.matrices[self.top];
+        self.matrices[self.top] = m.as_matrix().cast::<f32>() * self.matrices[self.top];
     }
 }
 
 #[derive(Debug)]
 struct ClientArray {
     pub enabled: bool,
-    pub vec_count: u32,
-    pub item_type: PointerDataType,
-    pub size: u8,
+    pub vertex_count: u32,
+    pub data_type: GLDataType,
+    pub element_count: u8,
     pub data: Option<Arc<Vec<u8>>>,
 }
 
@@ -111,9 +106,9 @@ impl ClientArray {
     pub fn new() -> Self {
         Self {
             enabled: false,
-            vec_count: 0,
-            item_type: PointerDataType::U8,
-            size: 0,
+            vertex_count: 0,
+            data_type: GLDataType::U8,
+            element_count: 0,
             data: None,
         }
     }
@@ -191,11 +186,8 @@ impl RenderInstruction {
             RenderInstruction::LoadIdentity => true,
             RenderInstruction::Ortho { .. } => true,
             RenderInstruction::Translate { .. } => true,
-            RenderInstruction::Translated { .. } => true,
             RenderInstruction::Rotate { .. } => true,
-            RenderInstruction::Rotated { .. } => true,
             RenderInstruction::Scale { .. } => true,
-            RenderInstruction::Scaled { .. } => true,
             _ => false,
         }
     }
@@ -205,7 +197,8 @@ impl RenderInstruction {
 struct VertexBufferSlot<'a> {
     pub array: &'a ClientArray,
     pub array_type: PointerArrayType,
-    pub buffer_offset: u32,
+    pub data_type: GLDataType,
+    pub buffer_offset: u8,
 }
 
 #[derive(Debug)]
@@ -229,7 +222,7 @@ pub struct RenderInsnAssembler {
 
     active_matrix: usize,
     matrix_stacks: [MatrixStack; 4],
-    active_mvp_cache: Option<TMat4<f64>>,
+    active_mvp_cache: Option<TMat4<f32>>,
 
     active_unit: usize,
     texture_units: [TextureUnit; MAX_TEXTURE_UNITS],
@@ -240,10 +233,11 @@ pub struct RenderInsnAssembler {
     client_arrays: [ClientArray; 8],
 
     pub commands: CommandQueue,
+    pub texture_lookup: Arc<TextureLookup>,
 }
 
 impl RenderInsnAssembler {
-    pub fn new(commands: CommandQueue) -> Self {
+    pub fn new(commands: CommandQueue, texture_lookup: Arc<TextureLookup>) -> Self {
         Self {
             active_flags: Set::with_capacity(64),
 
@@ -260,6 +254,7 @@ impl RenderInsnAssembler {
             client_arrays: from_fn(|_| ClientArray::new()),
 
             commands,
+            texture_lookup,
         }
     }
 
@@ -291,20 +286,11 @@ impl RenderInsnAssembler {
                 RenderInstruction::Translate { delta } => {
                     self.matrix_stacks[self.active_matrix].translate(delta);
                 }
-                RenderInstruction::Translated { delta } => {
-                    self.matrix_stacks[self.active_matrix].translated(delta);
-                }
                 RenderInstruction::Rotate { angle, axis } => {
                     self.matrix_stacks[self.active_matrix].rotate(axis, *angle);
                 }
-                RenderInstruction::Rotated { angle, axis } => {
-                    self.matrix_stacks[self.active_matrix].rotated(axis, *angle);
-                }
                 RenderInstruction::Scale { scale } => {
                     self.matrix_stacks[self.active_matrix].scale(scale);
-                }
-                RenderInstruction::Scaled { scale } => {
-                    self.matrix_stacks[self.active_matrix].scaled(scale);
                 }
 
                 RenderInstruction::Enable(param) => {
@@ -329,9 +315,9 @@ impl RenderInsnAssembler {
                     data,
                 } => {
                     let array = &mut self.client_arrays[get_client_array_index(array_type)];
-                    array.size = *size;
-                    array.vec_count = *vec_count;
-                    array.item_type = item_type.clone();
+                    array.element_count = *size;
+                    array.vertex_count = *vec_count;
+                    array.data_type = item_type.clone();
                     array.data = Some(data.clone());
                 }
                 RenderInstruction::DrawArrays { mode, first, count } => {
@@ -364,13 +350,13 @@ impl RenderInsnAssembler {
                 RenderInstruction::AlphaFunc => todo!(),
 
                 RenderInstruction::ClearDepth => {
-                    self.commands.push(RenderCommand::ClearDepth);
+                    self.commands.push(RenderCommand::ClearDepth).unwrap();
                 }
             }
         }
     }
 
-    fn get_mvp_matrix(&mut self) -> TMat4<f64> {
+    fn get_mvp_matrix(&mut self) -> TMat4<f32> {
         if let Some(mat) = self.active_mvp_cache.as_ref() {
             return mat.clone();
         }
@@ -383,13 +369,14 @@ impl RenderInsnAssembler {
         self.active_mvp_cache.as_ref().unwrap().clone()
     }
 
-    fn get_vertex_buffer_layout(
-        &mut self,
-    ) -> (VertexBufferDescription, Vec<VertexBufferSlot>, Option<u32>) {
-        let mut desc = VertexBufferDescription {
-            members: HashMap::new(),
+    pub fn is_enabled(&self, flag: u32) -> bool {
+        self.active_flags.contains(&(flag as usize))
+    }
+
+    fn get_vertex_buffer_layout(&self) -> (VertexBufferLayout, Vec<VertexBufferSlot>, usize) {
+        let mut desc = VertexBufferLayout {
+            fields: [const { None }; _],
             stride: 0,
-            input_rate: VertexInputRate::Vertex,
         };
 
         let mut layout = Vec::new();
@@ -397,170 +384,309 @@ impl RenderInsnAssembler {
         let mut vertex_count = None;
 
         for (i, array) in self.client_arrays.iter().enumerate() {
-            if array.enabled {
-                if array.data.is_none() {
-                    panic!("no data set but the array is enabled"); // TODO: don't panic here
-                }
+            if !array.enabled {
+                continue;
+            }
 
-                let size = array.item_type.size() as u32;
-                let n_past_align = desc.stride % size;
+            let array_type = get_client_array_type(i);
 
-                if let Some(vc) = &vertex_count {
-                    if array.vec_count != *vc {
-                        tracing::warn!(
-                            what = "found client array length mismatch",
-                            array = get_client_array_name(i),
-                            array_length = array.vec_count,
-                            expected_length = *vc,
-                        );
-                        if array.vec_count < *vc {
-                            vertex_count = Some(array.vec_count);
-                        }
-                    }
-                } else {
-                    vertex_count = Some(array.vec_count);
-                }
-
-                desc.stride += n_past_align;
-
-                desc.members.insert(
-                    get_client_array_name(i).to_owned(),
-                    VertexMemberInfo {
-                        offset: desc.stride as usize,
-                        format: match array.item_type {
-                            PointerDataType::F64 => Format::R64_SFLOAT,
-                            _ => Format::R32_SFLOAT,
-                        },
-                        num_elements: array.size as u32,
-                    },
+            if !array_type.is_supported() {
+                tracing::warn!(
+                    what = "client array is enabled, but arrays of this type are not supported",
+                    array = get_client_array_name(i),
                 );
+                continue;
+            }
+
+            if array.data.is_none() {
+                tracing::warn!(
+                    what = "client array is enabled, but no data was provided; its data will not be sent to the gpu",
+                    array = get_client_array_name(i),
+                );
+                continue;
+            }
+
+            if let Some(vc) = &vertex_count {
+                if array.vertex_count != *vc {
+                    tracing::warn!(
+                        what = "found client array length mismatch",
+                        array = get_client_array_name(i),
+                        array_length = array.vertex_count,
+                        expected_length = *vc,
+                        operation = if array.vertex_count < *vc {
+                            "pruned the other arrays"
+                        } else {
+                            "pruned this array"
+                        }
+                    );
+                    if array.vertex_count < *vc {
+                        vertex_count = Some(array.vertex_count);
+                    }
+                }
+            } else {
+                vertex_count = Some(array.vertex_count);
+            }
+
+            if array_type == PointerArrayType::TexCoord {
+                if !self.is_enabled(gl_constants::GL_TEXTURE_2D) {
+                    tracing::info!(
+                        what = "will not assemble texcoords because GL_TEXTURE_2D is disabled"
+                    );
+                    continue;
+                }
+
+                if self.get_active_texture().is_none() {
+                    tracing::info!(
+                        what = "will not assemble texcoords because there is no active texture"
+                    );
+                    continue;
+                }
+
+                if !matches!(array.data_type, GLDataType::F32 | GLDataType::F64)
+                    || array.element_count != 2
+                {
+                    tracing::info!(
+                        what = "will not assemble texcoords because some crazy bastard tried to give us non-(d)vec2 texcoords"
+                    );
+                    continue;
+                }
+            }
+
+            let size = array.data_type.size();
+
+            let field_idx = VertexInputType::from(array_type).to_usize().unwrap();
+
+            desc.fields[field_idx] = Some(VertexInputSpec {
+                offset: desc.stride,
+                data_type: array.data_type,
+                num_elements: array.element_count,
+            });
+
+            layout.push(VertexBufferSlot {
+                array,
+                buffer_offset: desc.stride,
+                data_type: array.data_type,
+                array_type,
+            });
+
+            desc.stride += size * array.element_count;
+            desc.align_to(4);
+
+            if array_type == PointerArrayType::TexCoord {
+                let data_type = GLDataType::U16;
+                let size = data_type.size();
+                let num_elements = 1;
+
+                let field_idx = VertexInputType::TexIndex.to_usize().unwrap();
+
+                desc.fields[field_idx] = Some(VertexInputSpec {
+                    offset: desc.stride,
+                    data_type,
+                    num_elements,
+                });
 
                 layout.push(VertexBufferSlot {
                     array,
                     buffer_offset: desc.stride,
-                    array_type: get_client_array_type(i),
+                    data_type,
+                    array_type,
                 });
 
-                desc.stride += size * array.size as u32;
+                desc.stride += size * num_elements;
+                desc.align_to(4);
             }
         }
 
-        (desc, layout, vertex_count)
+        (desc, layout, vertex_count.unwrap() as usize)
     }
 
-    pub fn draw_arrays(&mut self, mode: DrawMode, first: u32, count: u32) {
+    fn assemble_buffer(&self) -> (VertexBufferLayout, Vec<u8>) {
         let (desc, layout, vertex_count) = self.get_vertex_buffer_layout();
-        let vertex_count = match vertex_count {
-            Some(v) => v as usize,
-            None => {
-                return;
-            }
-        };
 
         let mut buffer = Vec::new();
         buffer.resize(vertex_count * (desc.stride as usize), 0);
 
-        for i in 0..vertex_count {
-            for array in &layout {
-                let dest_start = i * desc.stride as usize + array.buffer_offset as usize;
-                let vec_byte_size = array.array.size as usize * array.array.item_type.size();
-                let src_start = i * vec_byte_size;
+        for slot in &layout {
+            let input_type = VertexInputType::from(slot.array_type);
 
-                let dest = &mut buffer[dest_start..dest_start + vec_byte_size];
-                let src = &array.array.data.as_ref().unwrap()[src_start..src_start + vec_byte_size];
+            if input_type == VertexInputType::TexIndex {
+                continue;
+            }
 
-                assert_eq!(dest.len(), src.len());
+            if input_type == VertexInputType::TexCoord {
+                let texcoord = slot;
+                let texindex = layout
+                    .iter()
+                    .find(|l| VertexInputType::from(l.array_type) == VertexInputType::TexIndex)
+                    .unwrap();
 
-                macro_rules! convert {
-                    ($from:path) => {{
-                        let (_, dest, _) = unsafe { dest.align_to_mut::<f32>() };
-                        let (_, src, _) = unsafe { src.align_to::<$from>() };
+                let bound_texture = self.get_active_texture().unwrap();
 
-                        assert_eq!(dest.len(), src.len());
+                let dest_coord_byte_size = (texcoord.data_type.size() * 2) as usize;
+                let dest_index_byte_size = (texindex.data_type.size() * 2) as usize;
+                let src_byte_size = (texcoord.array.data_type.size() * 2) as usize;
 
-                        for i in 0..dest.len() {
-                            dest[i] = src[i] as f32;
+                for vertex_idx in 0..vertex_count {
+                    let vertex_start = vertex_idx * (desc.stride as usize);
+                    let dest_coord_start = vertex_start + texcoord.buffer_offset as usize;
+                    let dest_index_start = vertex_start + texindex.buffer_offset as usize;
+                    let src_start = vertex_idx * src_byte_size as usize;
+
+                    let uv = match texcoord.array.data_type {
+                        GLDataType::F32 => {
+                            let src = &texcoord.array.data.as_ref().unwrap()
+                                [src_start..src_start + src_byte_size];
+
+                            let src = unsafe { src.align_to::<f32>().1 };
+
+                            [src[0], src[1]]
                         }
-                    }};
+                        GLDataType::F64 => {
+                            let src = &texcoord.array.data.as_ref().unwrap()
+                                [src_start..src_start + src_byte_size];
+
+                            let src = unsafe { src.align_to::<f64>().1 };
+
+                            [src[0] as f32, src[1] as f32]
+                        }
+                        _ => panic!(),
+                    };
+
+                    self.texture_lookup.
                 }
+            } else {
+                let array = &slot.array;
+                let dest_byte_size = (array.element_count * slot.data_type.size()) as usize;
+                let src_byte_size = (array.element_count * array.data_type.size()) as usize;
 
-                macro_rules! convert_norm {
-                    ($from:path) => {{
-                        let (_, dest, _) = unsafe { dest.align_to_mut::<f32>() };
-                        let (_, src, _) = unsafe { src.align_to::<$from>() };
+                for vertex_idx in 0..vertex_count {
+                    let dest_start =
+                        vertex_idx * (desc.stride as usize) + (slot.buffer_offset as usize);
+                    let src_start = vertex_idx * (src_byte_size as usize);
 
-                        assert_eq!(dest.len(), src.len());
+                    let dest = &mut buffer[dest_start..dest_start + dest_byte_size];
+                    let src = &array.data.as_ref().unwrap()[src_start..src_start + src_byte_size];
 
-                        for i in 0..dest.len() {
-                            dest[i] = (src[i] as f32) / (<$from>::MAX as f32);
-                        }
-                    }};
-                }
+                    macro_rules! convert {
+                        ($from:path) => {{
+                            let (_, dest, _) = unsafe { dest.align_to_mut::<f32>() };
+                            let (_, src, _) = unsafe { src.align_to::<$from>() };
 
-                if array.array_type == PointerArrayType::Color
-                    || array.array_type == PointerArrayType::SecondaryColor
-                {
-                    match array.array.item_type {
-                        PointerDataType::U8 => convert_norm!(u8),
-                        PointerDataType::I8 => convert_norm!(i8),
-                        PointerDataType::U16 => convert_norm!(u16),
-                        PointerDataType::I16 => convert_norm!(i16),
-                        PointerDataType::U32 => convert_norm!(u32),
-                        PointerDataType::I32 => convert_norm!(i32),
-                        PointerDataType::F32 | PointerDataType::F64 => {
-                            dest.copy_from_slice(src);
-                        }
+                            assert_eq!(dest.len(), src.len());
+
+                            for i in 0..dest.len() {
+                                dest[i] = src[i] as f32;
+                            }
+                        }};
                     }
-                } else {
-                    match array.array.item_type {
-                        PointerDataType::U8 => convert!(u8),
-                        PointerDataType::I8 => convert!(i8),
-                        PointerDataType::U16 => convert!(u16),
-                        PointerDataType::I16 => convert!(i16),
-                        PointerDataType::U32 => convert!(u32),
-                        PointerDataType::I32 => convert!(i32),
-                        PointerDataType::F32 | PointerDataType::F64 => {
-                            dest.copy_from_slice(src);
+
+                    macro_rules! convert_norm {
+                        ($from:path) => {{
+                            let (_, dest, _) = unsafe { dest.align_to_mut::<f32>() };
+                            let (_, src, _) = unsafe { src.align_to::<$from>() };
+
+                            assert_eq!(dest.len(), src.len());
+
+                            for i in 0..dest.len() {
+                                dest[i] = (src[i] as f32) / (<$from>::MAX as f32);
+                            }
+                        }};
+                    }
+
+                    if slot.array_type == PointerArrayType::Color
+                        || slot.array_type == PointerArrayType::SecondaryColor
+                    {
+                        match slot.array.data_type {
+                            GLDataType::U8 => convert_norm!(u8),
+                            GLDataType::I8 => convert_norm!(i8),
+                            GLDataType::U16 => convert_norm!(u16),
+                            GLDataType::I16 => convert_norm!(i16),
+                            GLDataType::U32 => convert_norm!(u32),
+                            GLDataType::I32 => convert_norm!(i32),
+                            GLDataType::F32 | GLDataType::F64 => {
+                                dest.copy_from_slice(src);
+                            }
+                        }
+                    } else {
+                        match slot.array.data_type {
+                            GLDataType::U8 => convert!(u8),
+                            GLDataType::I8 => convert!(i8),
+                            GLDataType::U16 => convert!(u16),
+                            GLDataType::I16 => convert!(i16),
+                            GLDataType::U32 => convert!(u32),
+                            GLDataType::I32 => convert!(i32),
+                            GLDataType::F32 | GLDataType::F64 => {
+                                dest.copy_from_slice(src);
+                            }
                         }
                     }
                 }
             }
         }
 
-        let pipeline = DynamicPipelineSpec {
-            color: ColorMode::Flat_PC,
-            matrix: ShaderMatrixMode::MVP_PC,
-            normal: None,
-            position: VertexInputSpec {
-                name: "position".to_owned(),
-                format: vulkano::format::Format::R32_SFLOAT,
-                num_elements: 3,
-            },
+        (desc, buffer)
+    }
+
+    pub fn draw_arrays(&mut self, mode: DrawMode, first: u32, count: u32) {
+        if !self.client_arrays[VERTEX_ARRAY_IDX].enabled {
+            tracing::warn!(
+                what = "tried to call draw_arrays() without the position array set; this is invalid and the call will be ignored"
+            );
+            return;
+        }
+
+        let (desc, buffer) = self.assemble_buffer();
+
+        let color = if self
+            .active_flags
+            .contains(&(gl_constants::GL_TEXTURE_2D as usize))
+        {
+            if let Some(texture) = self.get_active_texture() {
+                if desc.texcoord().is_some() {
+                    ColorMode::Texture { set: 1, binding: 0 }
+                } else {
+                    tracing::warn!(what = "GL_TEXTURE_2D was enabled but the texcoord client array wasn't enabled/valid");
+                    ColorMode::Flat(DataSource::PushConstant)
+                }
+            } else {
+                tracing::warn!(what = "GL_TEXTURE_2D was enabled but the active texture unit didn't have a bound texture", texture_unit = self.active_unit);
+                ColorMode::Flat(DataSource::PushConstant)
+            }
+        } else {
+            ColorMode::Flat(DataSource::PushConstant)
         };
 
-        let mut push_constants = Vec::new();
+        let pipeline = DynamicPipelineSpec {
+            draw_mode: mode,
+            vertex_buffer: desc,
+            matrix: ShaderMatrixMode::MVP(DataSource::PushConstant),
+            color,
+            rasterization: DynamicPipelineRasterization::default(),
+        };
 
-        push_constants.push(DynamicPipelinePushConstants::MVP(self.get_mvp_matrix()));
-
-        if matches!(pipeline.color, ColorMode::Flat_PC) {
-            push_constants.push(DynamicPipelinePushConstants::Color(
-                self.active_color.clone().into(),
-            ));
-        }
+        let push_constants = DynamicPipelinePushConstants {
+            mvp: Some(self.get_mvp_matrix()),
+            color: if pipeline.color == ColorMode::Flat(DataSource::PushConstant) {
+                Some(self.active_color.clone().into())
+            } else {
+                None
+            },
+        };
 
         self.commands
             .push(RenderCommand::BindDynamicGraphicsPipeline {
                 pipeline,
                 push_constants,
-            });
+            })
+            .unwrap();
 
-        self.commands.push(RenderCommand::Draw {
-            mode: mode.clone(),
-            vertex: desc,
-            start_vertex: first,
-            vertex_count: count,
-            data: Arc::new(buffer),
-        });
+        self.commands
+            .push(RenderCommand::Draw {
+                start_vertex: first,
+                vertex_count: count,
+                data: Arc::new(buffer),
+            })
+            .unwrap();
     }
 
     pub fn get_active_texture(&self) -> Option<i32> {

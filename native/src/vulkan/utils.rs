@@ -1,11 +1,46 @@
-use std::{
-    cell::RefCell,
-    sync::{Arc, RwLock},
-};
+use std::cell::RefCell;
+use std::hash::Hash;
+use std::ops::Deref;
+use std::ops::DerefMut;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
+use num::Num;
 use smallvec::SmallVec;
 
-pub type Ref<T> = Arc<RefCell<T>>;
+#[derive(Debug)]
+pub struct Ref<T>(Arc<RwLock<T>>)
+where
+    T: Send + Sync,
+    Self: Send + Sync;
+
+impl<T: Send + Sync> Clone for Ref<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: Send + Sync> Ref<T> {
+    pub fn new(value: T) -> Self {
+        Self(Arc::new(RwLock::new(value)))
+    }
+
+    pub fn read(&self) -> impl Deref<Target = T> + '_ {
+        self.0.read().unwrap()
+    }
+
+    pub fn write(&self) -> impl DerefMut<Target = T> + '_ {
+        self.0.write().unwrap()
+    }
+}
+
+/// This type should ONLY be accessed from the main render thread.
+/// Access on other threads is undefined behaviour.
+pub struct MainRenderThread<T>(pub T);
+
+unsafe impl<T> Sync for MainRenderThread<T> {}
+unsafe impl<T> Send for MainRenderThread<T> {}
 
 pub trait Extract: Default {
     fn extract(&mut self) -> Self;
@@ -88,5 +123,35 @@ impl From<i64> for TypedVec {
 impl From<u64> for TypedVec {
     fn from(value: u64) -> Self {
         Self::U64s(SmallVec::from([value; 1]))
+    }
+}
+
+pub fn map<T: Num + Copy>(x: T, in_min: T, in_max: T, out_min: T, out_max: T) -> T {
+    (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+}
+
+pub struct ArcPtrKey<'a, T>(pub &'a Arc<T>);
+
+impl<T> Hash for ArcPtrKey<'_, T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(self.0).hash(state);
+    }
+}
+
+impl<T> PartialEq for ArcPtrKey<'_, T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(self.0, other.0)
+    }
+}
+impl<T> Eq for ArcPtrKey<'_, T> {}
+
+impl<T> PartialOrd for ArcPtrKey<'_, T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Arc::as_ptr(self.0).partial_cmp(&Arc::as_ptr(&other.0))
+    }
+}
+impl<T> Ord for ArcPtrKey<'_, T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        Arc::as_ptr(self.0).cmp(&Arc::as_ptr(&other.0))
     }
 }

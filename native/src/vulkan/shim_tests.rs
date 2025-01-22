@@ -12,7 +12,7 @@ use super::sandbox::{put_sandbox, take_sandbox};
 use super::sandbox_jni::client_arrays;
 use super::{
     insn_assembler::RenderInsnAssembler,
-    sandbox::{PointerArrayType, PointerDataType},
+    sandbox::{PointerArrayType, GLDataType},
 };
 
 unsafe fn env() -> JNIEnv<'static> {
@@ -63,7 +63,7 @@ fn add_pointer_u8_packed() {
             3,
             0,
             PointerArrayType::Color.to_i32().unwrap(),
-            PointerDataType::U8.to_i32().unwrap(),
+            GLDataType::U8.to_i32().unwrap(),
             data.as_ptr(),
             data.len() as i32,
         );
@@ -71,7 +71,7 @@ fn add_pointer_u8_packed() {
         assert_insns(&vec![RenderInstruction::SetPointer {
             vec_count: 5,
             array_type: PointerArrayType::Color,
-            item_type: PointerDataType::U8,
+            item_type: GLDataType::U8,
             data: Arc::new(data.clone()),
             size: 3,
         }]);
@@ -100,7 +100,7 @@ fn add_pointer_u8() {
             3,
             4,
             PointerArrayType::Color.to_i32().unwrap(),
-            PointerDataType::U8.to_i32().unwrap(),
+            GLDataType::U8.to_i32().unwrap(),
             data.as_ptr(),
             data.len() as i32,
         );
@@ -108,7 +108,7 @@ fn add_pointer_u8() {
         assert_insns(&vec![RenderInstruction::SetPointer {
             vec_count: 5,
             array_type: PointerArrayType::Color,
-            item_type: PointerDataType::U8,
+            item_type: GLDataType::U8,
             data: Arc::new(data_compact.clone()),
             size: 3,
         }]);
@@ -141,7 +141,7 @@ fn add_pointer_f32() {
             3,
             16,
             PointerArrayType::Color.to_i32().unwrap(),
-            PointerDataType::F32.to_i32().unwrap(),
+            GLDataType::F32.to_i32().unwrap(),
             data.as_ptr(),
             data.len() as i32,
         );
@@ -149,7 +149,7 @@ fn add_pointer_f32() {
         assert_insns(&vec![RenderInstruction::SetPointer {
             vec_count: 5,
             array_type: PointerArrayType::Color,
-            item_type: PointerDataType::F32,
+            item_type: GLDataType::F32,
             data: Arc::new(data_compact.clone()),
             size: 3,
         }]);
@@ -175,14 +175,14 @@ fn vertex_assembly() {
         RenderInstruction::SetPointer {
             vec_count: 10,
             array_type: PointerArrayType::Vertex,
-            item_type: PointerDataType::F32,
+            item_type: GLDataType::F32,
             data: Arc::new(unsafe { pos.align_to().1.to_owned() }),
             size: 3,
         },
         RenderInstruction::SetPointer {
             vec_count: 10,
             array_type: PointerArrayType::Color,
-            item_type: PointerDataType::F32,
+            item_type: GLDataType::F32,
             data: Arc::new(unsafe { color.align_to().1.to_owned() }),
             size: 3,
         },

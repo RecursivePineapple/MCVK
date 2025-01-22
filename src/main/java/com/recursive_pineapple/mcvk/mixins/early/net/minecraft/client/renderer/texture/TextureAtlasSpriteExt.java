@@ -6,4 +6,8 @@ public interface TextureAtlasSpriteExt {
     public default void setAnimationMetadata(AnimationMetadataSection animationMetadata) {
         
     }
+
+    public default void setUV(int u, int v) {
+
+    }
 }

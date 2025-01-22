@@ -1,6 +1,4 @@
-use std::cell::RefCell;
 use std::sync::RwLock;
-use std::sync::RwLockReadGuard;
 
 use anyhow::Context;
 
@@ -12,6 +10,7 @@ use crate::vulkan::glfw_window::GetRequiredInstanceExtensions;
 use crate::vulkan::glfw_window::GetWindowSize;
 use crate::vulkan::sandbox_jni::jni_prelude::*;
 use crate::vulkan::swapchain::VsyncMode;
+use crate::vulkan::utils::Ref;
 
 macro_rules! field_cache {
     {name: $name:ident, class: $class:literal, fields: { $($rust_name:ident / $ret_name:ident => $java_name:literal / $sig:literal),* $(,)? }} => {
@@ -94,7 +93,7 @@ pub static INSTANCE: RwLock<Option<MCVK>> = RwLock::new(None);
 macro_rules! read_instance_into {
     ($var:ident) => {
         let $var = crate::jni::INSTANCE.read().unwrap();
-        let $var = ($var).as_ref().unwrap();
+        let $var: &MCVK = ($var).as_ref().unwrap();
     };
 }
 
@@ -108,16 +107,16 @@ macro_rules! write_instance_into {
 macro_rules! read_field_into {
     ($var:ident ; $($field:ident);*) => {
         let $var = crate::jni::INSTANCE.read().unwrap();
-        let $var = ($var).as_ref().unwrap();
-        $(let $field = $var.$field.borrow();)*
+        let $var: &MCVK = ($var).as_ref().unwrap();
+        $(let $field = $var.$field.read();)*
     };
 }
 
 macro_rules! write_field_into {
     ($var:ident ; $($field:ident);*) => {
         let $var = crate::jni::INSTANCE.read().unwrap();
-        let $var = ($var).as_ref().unwrap();
-        $(let mut $field = $var.$field.borrow_mut();)*
+        let $var: &MCVK = ($var).as_ref().unwrap();
+        $(let mut $field = $var.$field.write();)*
     };
 }
 
@@ -137,7 +136,7 @@ unsafe fn initialize(
         jni_bail!(env, "instance was already initialized");
     }
 
-    let window = Arc::new(RefCell::new(GLFWWindow {
+    let window = Ref::new(GLFWWindow {
         glfw: GLFWFns {
             get_required_instance_extensions,
             get_physical_device_presentation_support,
@@ -145,7 +144,7 @@ unsafe fn initialize(
             get_window_size,
         },
         window: window_ptr as *mut glfw::ffi::GLFWwindow,
-    }));
+    });
 
     let inst = MCVK::new(window);
 

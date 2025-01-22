@@ -14,8 +14,7 @@ layout(set = 0, binding = 0) uniform MvpData {
 } uniforms;
 
 void main() {
-    mat4 worldview = uniforms.view * uniforms.model;
-    gl_Position = uniforms.projection * worldview * vec4(position, 1.0);
+    gl_Position = uniforms.projection * (uniforms.view * (uniforms.model * vec4(position, 1.0)));
     out_color = color;
     out_normal = mat3(uniforms.model) * normal;
 }

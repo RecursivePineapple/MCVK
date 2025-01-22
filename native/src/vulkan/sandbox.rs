@@ -1,9 +1,12 @@
-use std::sync::{atomic::AtomicI32, Arc, Mutex};
+use std::sync::Arc;
 
-use nalgebra_glm::{DVec3, Vec3, Vec4};
-use num_derive::{FromPrimitive, ToPrimitive};
+use nalgebra_glm::Vec3;
+use nalgebra_glm::Vec4;
+use num_derive::FromPrimitive;
+use num_derive::ToPrimitive;
 
-use super::{insn_assembler::RenderInsnAssembler, spinlock::SpinLock};
+use super::insn_assembler::RenderInsnAssembler;
+use super::spinlock::SpinLock;
 
 pub type RenderSandboxStack = Arc<SpinLock<RenderSandbox>>;
 
@@ -95,7 +98,7 @@ pub fn take_sandbox() -> Option<RenderSandbox> {
 }
 
 #[repr(u32)]
-#[derive(Debug, Clone, PartialEq, FromPrimitive, ToPrimitive)]
+#[derive(Debug, Clone, Copy, PartialEq, FromPrimitive, ToPrimitive)]
 pub enum MatrixMode {
     ModelView = gl_constants::GL_MODELVIEW,
     Projection = gl_constants::GL_PROJECTION,
@@ -104,7 +107,7 @@ pub enum MatrixMode {
 }
 
 #[repr(u32)]
-#[derive(Debug, Clone, PartialEq, FromPrimitive, ToPrimitive)]
+#[derive(Debug, Clone, Copy, PartialEq, FromPrimitive, ToPrimitive)]
 pub enum PointerArrayType {
     Color = gl_constants::GL_COLOR_ARRAY,
     EdgeFlag = gl_constants::GL_EDGE_FLAG_ARRAY,
@@ -117,8 +120,8 @@ pub enum PointerArrayType {
 }
 
 #[repr(u32)]
-#[derive(Debug, Clone, PartialEq, FromPrimitive, ToPrimitive)]
-pub enum PointerDataType {
+#[derive(Debug, Clone, Copy, PartialEq, FromPrimitive, ToPrimitive, Hash, Eq)]
+pub enum GLDataType {
     U8 = gl_constants::GL_UNSIGNED_BYTE,
     I8 = gl_constants::GL_BYTE,
     U16 = gl_constants::GL_UNSIGNED_SHORT,
@@ -129,20 +132,20 @@ pub enum PointerDataType {
     F64 = gl_constants::GL_DOUBLE,
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, PartialEq, FromPrimitive, ToPrimitive)]
+#[repr(u8)]
+#[derive(Debug, Clone, PartialEq, FromPrimitive, ToPrimitive, Hash, Eq)]
 pub enum DrawMode {
-    Points = gl_constants::GL_POINTS,
-    LineStrip = gl_constants::GL_LINE_STRIP,
-    LineLoop = gl_constants::GL_LINE_LOOP,
-    Lines = gl_constants::GL_LINES,
-    LineStripAdj = gl_constants::GL_LINE_STRIP_ADJACENCY,
-    LinesAdj = gl_constants::GL_LINES_ADJACENCY,
-    TriStrip = gl_constants::GL_TRIANGLE_STRIP,
-    TriFan = gl_constants::GL_TRIANGLE_FAN,
-    Tri = gl_constants::GL_TRIANGLES,
-    TriStripAdj = gl_constants::GL_TRIANGLE_STRIP_ADJACENCY,
-    TriAdj = gl_constants::GL_TRIANGLES_ADJACENCY,
+    Points = gl_constants::GL_POINTS as u8,
+    LineStrip = gl_constants::GL_LINE_STRIP as u8,
+    LineLoop = gl_constants::GL_LINE_LOOP as u8,
+    Lines = gl_constants::GL_LINES as u8,
+    LineStripAdj = gl_constants::GL_LINE_STRIP_ADJACENCY as u8,
+    LinesAdj = gl_constants::GL_LINES_ADJACENCY as u8,
+    TriStrip = gl_constants::GL_TRIANGLE_STRIP as u8,
+    TriFan = gl_constants::GL_TRIANGLE_FAN as u8,
+    Tri = gl_constants::GL_TRIANGLES as u8,
+    TriStripAdj = gl_constants::GL_TRIANGLE_STRIP_ADJACENCY as u8,
+    TriAdj = gl_constants::GL_TRIANGLES_ADJACENCY as u8,
 }
 
 structstruck::strike! {
@@ -165,22 +168,12 @@ structstruck::strike! {
         Translate {
             delta: Vec3,
         },
-        Translated {
-            delta: DVec3,
-        },
         Rotate {
             angle: f32,
             axis: Vec3,
         },
-        Rotated {
-            angle: f64,
-            axis: DVec3,
-        },
         Scale {
             scale: Vec3,
-        },
-        Scaled {
-            scale: DVec3,
         },
 
         Enable(i32),
@@ -193,7 +186,7 @@ structstruck::strike! {
         SetPointer {
             vec_count: u32,
             array_type: PointerArrayType,
-            item_type: PointerDataType,
+            item_type: GLDataType,
             data: Arc<Vec<u8>>,
             size: u8,
         },

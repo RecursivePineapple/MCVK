@@ -1,17 +1,20 @@
-use std::{
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::ops::Deref;
+use std::ops::DerefMut;
+use std::sync::Arc;
 
-use bytemuck::{Pod, Zeroable};
-use vulkano::{
-    buffer::{AllocateBufferError, Buffer, BufferUsage, Subbuffer},
-    memory::allocator::{MemoryTypeFilter, StandardMemoryAllocator},
-    sync::HostAccessError,
-    Validated,
-};
+use bytemuck::Pod;
+use bytemuck::Zeroable;
+use vulkano::buffer::AllocateBufferError;
+use vulkano::buffer::Buffer;
+use vulkano::buffer::BufferUsage;
+use vulkano::buffer::Subbuffer;
+use vulkano::memory::allocator::MemoryTypeFilter;
+use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::sync::HostAccessError;
+use vulkano::Validated;
 
-use crate::vulkan::{instance::Allocators, utils::Ref};
+use crate::vulkan::instance::Allocators;
+use crate::vulkan::utils::Ref;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UniformError {
@@ -37,7 +40,7 @@ where
 {
     pub fn new(allocators: &Ref<Allocators>, data: T) -> Result<Self, UniformError> {
         let uniform = Buffer::new_sized::<T>(
-            allocators.borrow().memory_allocator.clone(),
+            allocators.read().memory_allocator.clone(),
             vulkano::buffer::BufferCreateInfo {
                 usage: BufferUsage::UNIFORM_BUFFER,
                 ..Default::default()

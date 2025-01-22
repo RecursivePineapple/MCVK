@@ -14,16 +14,16 @@ use super::jni_prelude::*;
 pub unsafe fn glGenTextures(_: JNIEnv<'_>, _: JClass<'_>) -> jint {
     write_instance_into!(inst);
 
-    let tid = inst.textures.borrow_mut().create_texture();
+    let tid = inst.textures.write().create_texture(None);
 
-    transmute(tid)
+    tid.texture_id
 }
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.RenderSandbox")]
 pub unsafe fn glDeleteTextures(_: JNIEnv<'_>, _: JClass<'_>, texture: jint) {
     write_instance_into!(inst);
 
-    inst.textures.borrow_mut().free_texture(transmute(texture));
+    inst.textures.write().free_texture(transmute(texture));
 }
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.RenderSandbox")]
@@ -107,7 +107,7 @@ pub unsafe fn glTexParameterf(
     let texture = bound_texture.and_then(|t| {
         read_field_into!(inst; textures);
 
-        textures.get_texture_handle(t as u32).cloned()
+        textures.get_texture_handle(t)
     });
 
     match texture {
@@ -133,7 +133,7 @@ pub unsafe fn glTexParameteri(
     let texture = bound_texture.and_then(|t| {
         write_field_into!(inst; textures);
 
-        textures.get_texture_handle(t as u32).cloned()
+        textures.get_texture_handle(t)
     });
 
     match texture {
@@ -159,7 +159,7 @@ pub unsafe fn glGetTexParameterf(
     let texture = bound_texture.and_then(|t| {
         write_field_into!(inst; textures);
 
-        textures.get_texture_handle(t as u32).cloned()
+        textures.get_texture_handle(t)
     });
 
     match texture {
@@ -184,7 +184,7 @@ pub unsafe fn glGetTexParameteri(
     let texture = bound_texture.and_then(|t| {
         write_field_into!(inst; textures);
 
-        textures.get_texture_handle(t as u32).cloned()
+        textures.get_texture_handle(t)
     });
 
     match texture {
@@ -246,13 +246,21 @@ fn get_animation_metadata(
 }
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
-pub unsafe fn enqueueMissingSprite(mut env: JNIEnv<'_>, _: JClass<'_>, name: JString<'_>) {
+pub unsafe fn enqueueMissingSprite(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    name: JString<'_>,
+    u: jint,
+    v: jint,
+) {
     write_field_into!(inst; textures);
+    let uv = [u as f32, v as f32];
 
     throw!(
         env,
         textures.enqueue_sprite(
             env.get_string_unchecked(&name).unwrap().into(),
+            uv,
             TextureImage::None,
         )
     );
@@ -265,11 +273,15 @@ pub unsafe fn enqueueFrameSprite(
     name: JString<'_>,
     width: jint,
     height: jint,
+    u: jint,
+    v: jint,
     frames: JObjectArray<'_>,
     animation: JString<'_>,
 ) {
     let width = width as usize;
     let height = height as usize;
+    let uv = [u as f32, v as f32];
+
     write_instance_into!(inst);
 
     let frame_count = env.get_array_length(&frames).unwrap();
@@ -302,8 +314,8 @@ pub unsafe fn enqueueFrameSprite(
             throw!(
                 env,
                 inst.textures
-                    .borrow_mut()
-                    .enqueue_sprite(name, TextureImage::None)
+                    .write()
+                    .enqueue_sprite(name, uv, TextureImage::None)
             );
             return;
         }
@@ -327,8 +339,9 @@ pub unsafe fn enqueueFrameSprite(
         if let Some(animation) = get_animation_metadata(&mut env, animation) {
             throw!(
                 env,
-                inst.textures.borrow_mut().enqueue_sprite(
+                inst.textures.write().enqueue_sprite(
                     name,
+                    uv,
                     TextureImage::Frames {
                         width: width as u32,
                         height: width as u32,
@@ -345,15 +358,16 @@ pub unsafe fn enqueueFrameSprite(
             throw!(
                 env,
                 inst.textures
-                    .borrow_mut()
-                    .enqueue_sprite(name, TextureImage::None)
+                    .write()
+                    .enqueue_sprite(name, uv, TextureImage::None)
             );
         };
     } else {
         throw!(
             env,
-            inst.textures.borrow_mut().enqueue_sprite(
+            inst.textures.write().enqueue_sprite(
                 name,
+                uv,
                 TextureImage::Static {
                     image: images.remove(0),
                 },
@@ -368,8 +382,11 @@ pub unsafe fn enqueueRawSprite(
     _: JClass<'_>,
     name: JString<'_>,
     image: JByteBuffer<'_>,
+    u: jint,
+    v: jint,
     animation: JString<'_>,
 ) {
+    let uv = [u as f32, v as f32];
     write_instance_into!(inst);
 
     let image = std::slice::from_raw_parts(
@@ -379,8 +396,9 @@ pub unsafe fn enqueueRawSprite(
 
     throw!(
         env,
-        inst.textures.borrow_mut().enqueue_sprite(
+        inst.textures.write().enqueue_sprite(
             env.get_string_unchecked(&name).unwrap().into(),
+            uv,
             TextureImage::Data {
                 data: image.to_owned(),
                 animation: get_animation_metadata(&mut env, animation),
@@ -393,12 +411,12 @@ pub unsafe fn enqueueRawSprite(
 pub unsafe fn beginTextureReload(_: JNIEnv<'_>, _: JClass<'_>) {
     write_instance_into!(inst);
 
-    inst.textures.borrow_mut().begin_texture_reload();
+    inst.textures.write().begin_texture_reload();
 }
 
 #[jni_export("com.recursive_pineapple.mcvk.rendering.MCVKNative")]
 pub unsafe fn finishTextureReload(mut env: JNIEnv<'_>, _: JClass<'_>) {
     write_instance_into!(inst);
 
-    throw!(env, inst.textures.borrow_mut().finish_texture_reload());
+    throw!(env, inst.textures.write().finish_texture_reload());
 }

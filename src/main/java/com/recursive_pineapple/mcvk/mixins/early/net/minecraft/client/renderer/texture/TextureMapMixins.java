@@ -70,12 +70,35 @@ public abstract class TextureMapMixins {
 
         Gson gson = new Gson();
 
+        // diagonal row tiling
+        // we start at 0,0 and lay tiles out along a diagonal line
+        // once we hit the end of the line, we go to the next one and reverse direction
+        // so it'd be 0,0, then 0,1 then 1,0 then 0,2 then 1,1 then 2,0 etc
+        int u = 0, v = 0, du = 1, dv = -1;
+
         for(var entry : this.mapRegisteredSprites.entrySet()) {
             String name = entry.getKey();
             TextureAtlasSprite sprite = entry.getValue();
             bar.step(name);
 
-            this.loadSprite(gson, resourceManager, name, sprite, staging, buffer);
+            ((TextureAtlasSpriteExt)sprite).setUV(u, v);
+
+            this.loadSprite(gson, resourceManager, name, u, v, sprite, staging, buffer);
+
+            if (u + du < 0) {
+                du = -du;
+                dv = -dv;
+                v++;
+            }
+
+            if (v + dv < 0) {
+                du = -du;
+                dv = -dv;
+                u++;
+            }
+
+            u += du;
+            v += dv;
         }
 
         MCVKNative.finishTextureReload();
@@ -86,7 +109,7 @@ public abstract class TextureMapMixins {
     }
 
     @SuppressWarnings("unchecked")
-    private void loadSprite(Gson gson, IResourceManager resourceManager, String name, TextureAtlasSprite sprite, ByteArrayOutputStream staging, byte[] buffer) {
+    private void loadSprite(Gson gson, IResourceManager resourceManager, String name, int u, int v, TextureAtlasSprite sprite, ByteArrayOutputStream staging, byte[] buffer) {
         ResourceLocation location = new ResourceLocation(name);
 
         if (sprite.hasCustomLoader(resourceManager, location)) {
@@ -99,7 +122,7 @@ public abstract class TextureMapMixins {
                     animation = (AnimationMetadataSection)Statics.animationMetadataField.get(sprite);
                 } catch (IllegalArgumentException | IllegalAccessException e) {
                     MCVK.LOG.error("could not get sprite frames", e);
-                    MCVKNative.enqueueMissingSprite(name);
+                    MCVKNative.enqueueMissingSprite(name, u, v);
                     return;
                 }
 
@@ -112,6 +135,7 @@ public abstract class TextureMapMixins {
                     name,
                     width, height,
                     frames_array,
+                    u, v,
                     gson.toJson(animation)
                 );
             }
@@ -142,7 +166,7 @@ public abstract class TextureMapMixins {
                 buffer2.put(data);
                 buffer2.flip();
 
-                MCVKNative.enqueueRawSprite(name, buffer2, gson.toJson(animation));
+                MCVKNative.enqueueRawSprite(name, buffer2, u, v, gson.toJson(animation));
             } catch (IOException e) {
                 MCVK.LOG.error("could not get sprite image data", e);
                 MCVKNative.enqueueMissingSprite(name);

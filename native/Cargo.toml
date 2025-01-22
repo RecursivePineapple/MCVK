@@ -16,8 +16,6 @@ enum_primitive = "0.1"
 structstruck = "0.4"
 derivative = "2.2"
 
-fastset = "0.4"
-
 serde = "1.0"
 serde_json = "1.0"
 # bincode = "1.3"
@@ -32,23 +30,26 @@ bytemuck = "1.15"
 nalgebra = { version = "0.32", features = ["bytemuck"] }
 nalgebra-glm = "0.18"
 smallvec = "1.13"
-
 num = "0.4"
 num-derive = "0.4"
 num-traits = "0.2"
 
-gl_constants = "0.1.1"
-
-glfw = { version = "0", features = ["vulkan"] }
+image = "0.25"
 
 vulkano = "0.34"
 ash = "0.37"
+gl_constants = "0.1.1"
+glfw = { version = "0", features = ["vulkan"] }
 
 vulkano-shaders = "0.34"
-shaderc = "0.8"
 concat-string = "1.0"
+glslang = "0.6"
 
-image = "0.25"
+weak-table = "0.3"
+lru = "0.12"
+fastset = "0.4"
+static_aabb2d_index = "2.0"
+slab = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.4", features = ["html_reports"] }
